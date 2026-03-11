@@ -1,0 +1,23 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets — never commit
+*.pem
+*.key
+.env.local
+
+# Terraform (if ever added)
+.terraform/
+*.tfstate
+*.tfstate.backup
+
+# Logs
+*.log
