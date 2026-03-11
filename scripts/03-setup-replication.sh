@@ -63,47 +63,29 @@ main() {
     --resource-group "$RESOURCE_GROUP" \
     --query "id" -o tsv)
 
-  # ── Build policy definition JSON ────────────────
-  log "Building replication policy with ${CONTAINER_COUNT} rule(s)..."
-  local rules_json="[]"
-  for i in $(seq -w 1 "$CONTAINER_COUNT"); do
-    local src_container="${SOURCE_CONTAINER_PREFIX}-${i}"
-    local dst_container="${DEST_CONTAINER_PREFIX}-${i}"
-    rules_json=$(echo "$rules_json" | jq \
-      --arg sc "$src_container" \
-      --arg dc "$dst_container" \
-      '. += [{"ruleId": "", "sourceContainer": $sc, "destinationContainer": $dc, "filters": {"minCreationTime": ""}}]')
-  done
-
-  local policy_json
-  policy_json=$(jq -n \
-    --arg src "$src_id" \
-    --arg dst "$dst_id" \
-    --argjson rules "$rules_json" \
-    '{
-      "properties": {
-        "policyId": "default",
-        "sourceAccount": $src,
-        "destinationAccount": $dst,
-        "rules": $rules
-      }
-    }')
-
-  local policy_file
-  policy_file=$(mktemp /tmp/or-policy-XXXXXX.json)
-  echo "$policy_json" > "$policy_file"
-
   if [[ "$REPLICATION_MODE" == "priority" ]]; then
     log "Priority replication mode selected (99% within 15 min SLA for same-continent)"
   fi
 
-  # ── Create policy on destination account ────────
+  # ── Create policy with the first rule ───────────
+  local first_src="${SOURCE_CONTAINER_PREFIX}-1"
+  local first_dst="${DEST_CONTAINER_PREFIX}-1"
   log "Creating replication policy on destination account '${DEST_STORAGE}'..."
-  run_or_dry "az storage account or-policy create \
+
+  local create_cmd="az storage account or-policy create \
     --account-name '${DEST_STORAGE}' \
     --resource-group '${RESOURCE_GROUP}' \
-    --policy @'${policy_file}' \
-    --output none"
+    --source-account '${src_id}' \
+    --destination-account '${dst_id}' \
+    --destination-container '${first_dst}' \
+    --source-container '${first_src}'"
+
+  if [[ "$REPLICATION_MODE" == "priority" ]]; then
+    create_cmd="${create_cmd} --priority-replication true"
+  fi
+
+  create_cmd="${create_cmd} --output none"
+  run_or_dry "$create_cmd"
 
   # Get the assigned policy ID
   local policy_id
@@ -113,16 +95,33 @@ main() {
     --query "[0].policyId" -o tsv 2>/dev/null || echo "")
 
   if [[ -z "$policy_id" ]]; then
-    rm -f "$policy_file"
     err "Failed to create or retrieve replication policy on destination account"
     exit 1
   fi
   ok "Policy created on destination with ID: ${policy_id}"
+  ok "Rule: ${first_src} → ${first_dst}"
+
+  # ── Add remaining rules ─────────────────────────
+  if [[ "$CONTAINER_COUNT" -gt 1 ]]; then
+    log "Adding remaining $((CONTAINER_COUNT - 1)) rule(s)..."
+    for i in $(seq 2 "$CONTAINER_COUNT"); do
+      local src_container="${SOURCE_CONTAINER_PREFIX}-${i}"
+      local dst_container="${DEST_CONTAINER_PREFIX}-${i}"
+      run_or_dry "az storage account or-policy rule add \
+        --account-name '${DEST_STORAGE}' \
+        --resource-group '${RESOURCE_GROUP}' \
+        --policy-id '${policy_id}' \
+        --source-container '${src_container}' \
+        --destination-container '${dst_container}' \
+        --output none"
+      ok "Rule: ${src_container} → ${dst_container}"
+    done
+  fi
 
   # ── Create matching policy on source account ────
   log "Creating matching policy on source account '${SOURCE_STORAGE}'..."
 
-  # Download the policy from destination (includes assigned IDs)
+  # Get the full policy from destination (includes assigned rule IDs)
   local dest_policy
   dest_policy=$(az storage account or-policy show \
     --account-name "$DEST_STORAGE" \
@@ -130,28 +129,22 @@ main() {
     --policy-id "$policy_id" \
     --output json 2>/dev/null)
 
-  # Write the destination policy to file for source
-  local src_policy_file
-  src_policy_file=$(mktemp /tmp/or-policy-src-XXXXXX.json)
-  echo "$dest_policy" | jq '{properties: {policyId: .policyId, sourceAccount: .sourceAccount, destinationAccount: .destinationAccount, rules: [.rules[] | {ruleId: .ruleId, sourceContainer: .sourceContainer, destinationContainer: .destinationContainer, filters: .filters}]}}' > "$src_policy_file"
+  # Write policy to temp file for source account
+  local policy_file
+  policy_file=$(mktemp /tmp/or-policy-XXXXXX.json)
+  echo "$dest_policy" > "$policy_file"
 
   run_or_dry "az storage account or-policy create \
     --account-name '${SOURCE_STORAGE}' \
     --resource-group '${RESOURCE_GROUP}' \
-    --policy @'${src_policy_file}' \
+    --policy @'${policy_file}' \
     --output none"
   ok "Matching policy created on source account"
 
-  rm -f "$policy_file" "$src_policy_file"
+  rm -f "$policy_file"
 
-  # ── Enable priority replication if requested ────
+  # ── Priority replication note ───────────────────
   if [[ "$REPLICATION_MODE" == "priority" ]]; then
-    log "Enabling priority replication on policy ${policy_id}..."
-    run_or_dry "az storage account or-policy update \
-      --account-name '${DEST_STORAGE}' \
-      --resource-group '${RESOURCE_GROUP}' \
-      --policy-id '${policy_id}' \
-      --output none" || true
     ok "Priority replication enabled"
     warn "Note: priority replication has a per-GB ingress cost and billing continues 30 days after disabling"
   fi
