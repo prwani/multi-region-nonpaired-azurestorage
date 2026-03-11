@@ -241,6 +241,9 @@ This is the core step:
 
 Since we set **copy scope = all objects**, the existing ~1 GB of data starts replicating immediately (historical catchup).
 
+> **⚠️ Important: Copy Scope**
+> By default, object replication only copies **new blobs** created after the rule is established — pre-existing data is silently skipped. This is a common gotcha. Our scripts set the copy scope to "all objects" (`--min-creation-time '1601-01-01T00:00:00Z'`), ensuring both existing and future blobs are replicated. If you're setting this up manually in the Azure Portal, make sure to change the copy scope from "Copy only new objects" to "Copy all objects" in the container pair configuration.
+
 ### Step 5 (Benchmarking): Continue Ingestion
 
 **Bash:**
@@ -336,6 +339,8 @@ DATA_SIZE_GB="10"
 ### Measuring Historical Catchup
 
 Historical catchup is the time taken to replicate pre-existing data after a replication policy is created.
+
+> **Note:** This measurement only works because our scripts set the copy scope to replicate **all objects** (`--min-creation-time '1601-01-01T00:00:00Z'`). With the default copy scope, pre-existing blobs would be ignored and there would be no historical catchup to measure.
 
 1. Run `bench-01-ingest-data.sh` **before** `03-setup-replication.sh`
 2. Note the timestamp when replication is configured

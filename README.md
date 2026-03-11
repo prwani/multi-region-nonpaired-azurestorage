@@ -84,6 +84,8 @@ This repo provides:
 | 2. Enable change feed, versioning, containers | `./scripts/02-enable-prereqs.sh` | `./scripts/02-enable-prereqs.ps1` |
 | 3. *(Bench)* Ingest test data before replication | `./scripts/bench-01-ingest-data.sh` | `./scripts/bench-01-ingest-data.ps1` |
 | 4. Set up object replication policy | `./scripts/03-setup-replication.sh` | `./scripts/03-setup-replication.ps1` |
+
+> **⚠️ Copy Scope:** By default, object replication only copies **new blobs** — pre-existing data is skipped. Our scripts set `--min-creation-time '1601-01-01T00:00:00Z'` to replicate all existing and future objects. If configuring manually, set the copy scope to "Copy all objects".
 | 5. *(Bench)* Continue ingestion | `./scripts/bench-02-continue-ingestion.sh` | `./scripts/bench-02-continue-ingestion.ps1` |
 | 6. *(Bench)* Monitor replication metrics | `./scripts/bench-03-monitor-replication.sh` | `./scripts/bench-03-monitor-replication.ps1` |
 
