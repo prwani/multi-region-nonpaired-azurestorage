@@ -1,39 +1,90 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# bench-01-ingest-data.sh — Generate test data using AzDataMaker
+# bench-01-ingest-data.sh — Generate test data and upload to source containers
 #
-# BENCHMARKING ONLY — ACR, ACI, and AzDataMaker are not part of a production
-# object replication setup. This script creates test data to measure
-# replication performance.
+# BENCHMARKING ONLY — generates test data to measure replication performance.
+#
+# Uses local file generation + az CLI upload (--auth-mode login) by default.
+# Pass --use-azdatamaker to use AzDataMaker via ACR/ACI instead (requires
+# shared key access on the storage account).
 # ─────────────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
+USE_AZDATAMAKER=false
+
 usage() {
   echo "Usage: $0 [OPTIONS]"
   echo ""
-  echo "Deploy AzDataMaker via ACR/ACI to generate test data in source containers."
+  echo "Generate test data and upload to source containers."
   echo "This is for benchmarking only — not part of production setup."
   echo ""
   echo "Options:"
   echo "  --data-size-gb <n>     Total data to generate in GB (default: 1)"
-  echo "  --aci-count <n>        Number of ACI instances (default: 1)"
+  echo "  --aci-count <n>        Number of ACI instances (default: 1, AzDataMaker only)"
   echo "  --container-count <n>  Number of containers (default: 5)"
+  echo "  --use-azdatamaker      Use AzDataMaker via ACR/ACI (needs shared key access)"
   echo "  --subscription <id>    Azure subscription ID"
   echo "  --dry-run              Preview without executing"
   echo "  -h, --help             Show this help"
 }
 
-main() {
-  load_config
-  parse_common_args "$@"
-  set_subscription
+# Override parse to handle --use-azdatamaker
+parse_bench_args() {
+  local remaining=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --use-azdatamaker) USE_AZDATAMAKER=true; shift ;;
+      *) remaining+=("$1"); shift ;;
+    esac
+  done
+  parse_common_args "${remaining[@]}"
+}
 
-  require_tool az
+ingest_local() {
+  compute_azdatamaker_params
 
-  local start_time
-  start_time=$(date +%s)
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" EXIT
 
+  log "Generating ${FILE_COUNT} test files locally..."
+  local containers
+  IFS=',' read -ra containers <<< "$(get_container_names "$SOURCE_CONTAINER_PREFIX")"
+  local container_idx=0
+
+  for i in $(seq 1 "$FILE_COUNT"); do
+    # Random size between MIN and MAX
+    local size_mb
+    size_mb=$(( RANDOM % (MAX_FILE_SIZE - MIN_FILE_SIZE + 1) + MIN_FILE_SIZE ))
+    local fname="testfile-$(printf '%04d' "$i").bin"
+    local container="${containers[$container_idx]}"
+    container_idx=$(( (container_idx + 1) % ${#containers[@]} ))
+
+    # Generate file
+    dd if=/dev/urandom of="${tmpdir}/${fname}" bs=1M count="$size_mb" 2>/dev/null
+
+    # Upload
+    run_or_dry "az storage blob upload \
+      --account-name '${SOURCE_STORAGE}' \
+      --container-name '${container}' \
+      --name '${fname}' \
+      --file '${tmpdir}/${fname}' \
+      --auth-mode login \
+      --overwrite \
+      --no-progress \
+      --output none"
+
+    rm -f "${tmpdir}/${fname}"
+
+    if (( i % 10 == 0 )); then
+      ok "${i}/${FILE_COUNT} files uploaded"
+    fi
+  done
+  ok "All ${FILE_COUNT} files uploaded"
+}
+
+ingest_azdatamaker() {
   # ── Create ACR ──────────────────────────────────
   log "Setting up Azure Container Registry '${ACR_NAME}'..."
   if az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
@@ -61,7 +112,6 @@ main() {
     --output none" || true
   ok "AzDataMaker image built"
 
-  # ── Compute data generation parameters ──────────
   compute_azdatamaker_params
 
   # ── Enable shared key access (required by AzDataMaker connection string) ──
@@ -71,7 +121,7 @@ main() {
     --resource-group '${RESOURCE_GROUP}' \
     --allow-shared-key-access true \
     --output none"
-  ok "Shared key access enabled on '${SOURCE_STORAGE}'"
+  warn "If shared key access is blocked by subscription policy, use default mode (without --use-azdatamaker)"
 
   # ── Get credentials ─────────────────────────────
   local acr_server acr_user acr_pwd storage_cs
@@ -80,7 +130,6 @@ main() {
   acr_pwd=$(az acr credential show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query "passwords[0].value" -o tsv)
   storage_cs=$(az storage account show-connection-string --name "$SOURCE_STORAGE" --resource-group "$RESOURCE_GROUP" -o tsv)
 
-  # ── Build container list ────────────────────────
   local container_names
   container_names=$(get_container_names "$SOURCE_CONTAINER_PREFIX")
 
@@ -90,7 +139,6 @@ main() {
     local aci_name
     aci_name=$(printf "%s-%02d" "$ACI_PREFIX" "$x")
 
-    # Check if instance already exists
     if az container show --name "$aci_name" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
       ok "ACI '${aci_name}' already exists — skipping"
       continue
@@ -146,6 +194,25 @@ main() {
       fi
     done
     echo ""
+  fi
+}
+
+main() {
+  load_config
+  parse_bench_args "$@"
+  set_subscription
+
+  require_tool az
+
+  local start_time
+  start_time=$(date +%s)
+
+  if $USE_AZDATAMAKER; then
+    log "Using AzDataMaker (ACR/ACI) for data generation..."
+    ingest_azdatamaker
+  else
+    log "Using local file generation + az CLI upload..."
+    ingest_local
   fi
 
   local end_time elapsed
