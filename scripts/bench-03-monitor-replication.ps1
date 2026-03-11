@@ -30,7 +30,6 @@ function Check-BlobReplicationStatus {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Account,
-        [Parameter(Mandatory)][string]$Key,
         [Parameter(Mandatory)][string]$Container,
         [int]$SampleCount = 5
     )
@@ -39,7 +38,7 @@ function Check-BlobReplicationStatus {
     try {
         $blobs = az storage blob list `
             --account-name $Account `
-            --account-key $Key `
+            --auth-mode login `
             --container-name $Container `
             --num-results $SampleCount `
             --query "[].name" -o tsv 2>$null
@@ -64,7 +63,7 @@ function Check-BlobReplicationStatus {
         try {
             $status = az storage blob show `
                 --account-name $Account `
-                --account-key $Key `
+                --auth-mode login `
                 --container-name $Container `
                 --name $blob `
                 --query "properties.replicationStatus" -o tsv 2>$null
@@ -127,10 +126,6 @@ Set-AzSubscription
 Test-RequiredTool 'az'
 
 # ── Get account info (BENCHMARKING ONLY) ─────────
-$srcKey = az storage account keys list `
-    --account-name $script:SourceStorage `
-    --resource-group $script:ResourceGroup `
-    --query "[0].value" -o tsv
 $srcId = az storage account show `
     --name $script:SourceStorage `
     --resource-group $script:ResourceGroup `
@@ -141,7 +136,7 @@ Write-Log "═══ Blob Replication Status (sampled) ═══"
 $width = ([string]$script:ContainerCount).Length
 for ($i = 1; $i -le $script:ContainerCount; $i++) {
     $cname = "$($script:SourceContainerPrefix)-$($i.ToString().PadLeft($width, '0'))"
-    Check-BlobReplicationStatus -Account $script:SourceStorage -Key $srcKey -Container $cname -SampleCount 5
+    Check-BlobReplicationStatus -Account $script:SourceStorage -Container $cname -SampleCount 5
 }
 
 # ── Query Azure Monitor metrics ──────────────────

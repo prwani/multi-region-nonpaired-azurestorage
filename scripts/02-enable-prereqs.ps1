@@ -69,18 +69,13 @@ foreach ($acct in @($script:SourceStorage, $script:DestStorage)) {
 
 # ── Create source containers ────────────────────
 Write-Log "Creating $($script:ContainerCount) source container(s)..."
-$srcKey = az storage account keys list `
-    --account-name $script:SourceStorage `
-    --resource-group $script:ResourceGroup `
-    --query "[0].value" -o tsv
-
 $width = ([string]$script:ContainerCount).Length
 for ($i = 1; $i -le $script:ContainerCount; $i++) {
     $cname = "$($script:SourceContainerPrefix)-$($i.ToString().PadLeft($width, '0'))"
     $exists = az storage container exists `
         --name $cname `
         --account-name $script:SourceStorage `
-        --account-key $srcKey `
+        --auth-mode login `
         --query "exists" -o tsv 2>$null
     if (-not $exists) { $exists = "false" }
 
@@ -91,7 +86,7 @@ for ($i = 1; $i -le $script:ContainerCount; $i++) {
             az storage container create `
                 --name $cname `
                 --account-name $script:SourceStorage `
-                --account-key $srcKey `
+                --auth-mode login `
                 --output none
         }
         Write-Ok "Container '$cname' created"

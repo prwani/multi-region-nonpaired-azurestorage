@@ -27,18 +27,13 @@ Test-RequiredTool az
 
 # ── Create destination containers ───────────────
 Write-Log "Creating $($script:ContainerCount) destination container(s)..."
-$dstKey = az storage account keys list `
-    --account-name $script:DestStorage `
-    --resource-group $script:ResourceGroup `
-    --query "[0].value" -o tsv
-
 $width = ([string]$script:ContainerCount).Length
 for ($i = 1; $i -le $script:ContainerCount; $i++) {
     $cname = "$($script:DestContainerPrefix)-$($i.ToString().PadLeft($width, '0'))"
     $exists = az storage container exists `
         --name $cname `
         --account-name $script:DestStorage `
-        --account-key $dstKey `
+        --auth-mode login `
         --query "exists" -o tsv 2>$null
     if (-not $exists) { $exists = "false" }
 
@@ -49,7 +44,7 @@ for ($i = 1; $i -le $script:ContainerCount; $i++) {
             az storage container create `
                 --name $cname `
                 --account-name $script:DestStorage `
-                --account-key $dstKey `
+                --auth-mode login `
                 --output none
         }
         Write-Ok "Container '$cname' created"
