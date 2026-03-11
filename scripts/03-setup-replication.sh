@@ -68,9 +68,11 @@ main() {
   fi
 
   # ── Create policy with the first rule ───────────
+  # Use min-creation-time '1601-01-01T00:00:00Z' to replicate ALL objects (existing + new)
   local first_src="${SOURCE_CONTAINER_PREFIX}-1"
   local first_dst="${DEST_CONTAINER_PREFIX}-1"
   log "Creating replication policy on destination account '${DEST_STORAGE}'..."
+  log "Copy scope: all objects (existing + new)"
 
   local create_cmd="az storage account or-policy create \
     --account-name '${DEST_STORAGE}' \
@@ -78,7 +80,8 @@ main() {
     --source-account '${src_id}' \
     --destination-account '${dst_id}' \
     --destination-container '${first_dst}' \
-    --source-container '${first_src}'"
+    --source-container '${first_src}' \
+    --min-creation-time '1601-01-01T00:00:00Z'"
 
   if [[ "$REPLICATION_MODE" == "priority" ]]; then
     create_cmd="${create_cmd} --priority-replication true"
@@ -113,6 +116,7 @@ main() {
         --policy-id '${policy_id}' \
         --source-container '${src_container}' \
         --destination-container '${dst_container}' \
+        --min-creation-time '1601-01-01T00:00:00Z' \
         --output none"
       ok "Rule: ${src_container} → ${dst_container}"
     done
