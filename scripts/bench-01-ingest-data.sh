@@ -64,6 +64,15 @@ main() {
   # ── Compute data generation parameters ──────────
   compute_azdatamaker_params
 
+  # ── Enable shared key access (required by AzDataMaker connection string) ──
+  log "Ensuring shared key access is enabled on source account..."
+  run_or_dry "az storage account update \
+    --name '${SOURCE_STORAGE}' \
+    --resource-group '${RESOURCE_GROUP}' \
+    --allow-shared-key-access true \
+    --output none"
+  ok "Shared key access enabled on '${SOURCE_STORAGE}'"
+
   # ── Get credentials ─────────────────────────────
   local acr_server acr_user acr_pwd storage_cs
   acr_server=$(az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query loginServer -o tsv)
@@ -91,6 +100,7 @@ main() {
       --name '${aci_name}' \
       --resource-group '${RESOURCE_GROUP}' \
       --location '${SOURCE_REGION}' \
+      --os-type Linux \
       --cpu 1 \
       --memory 1 \
       --registry-login-server '${acr_server}' \

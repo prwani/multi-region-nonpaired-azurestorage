@@ -154,8 +154,11 @@ function Import-Config {
     $script:FileCount             = Resolve-Var 'FILE_COUNT'              ''
     $script:AciPrefix             = Resolve-Var 'ACI_PREFIX'              'azdatamaker'
 
-    # Auto-generate storage / ACR names with random suffix if blank
-    $suffix = -join ((0..5) | ForEach-Object { '0123456789abcdef'[(Get-Random -Maximum 16)] })
+    # Auto-generate storage / ACR names with stable suffix derived from resource group
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($script:ResourceGroup)
+    $hash = $md5.ComputeHash($bytes)
+    $suffix = -join ($hash[0..2] | ForEach-Object { $_.ToString('x2') })
 
     $srcStorage = Resolve-Var 'SOURCE_STORAGE' ''
     $script:SourceStorage = if ([string]::IsNullOrWhiteSpace($srcStorage)) { "objreplsrc$suffix" } else { $srcStorage }

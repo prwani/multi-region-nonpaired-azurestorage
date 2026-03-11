@@ -22,15 +22,14 @@ usage() {
 
 check_blob_replication_status() {
   local account="$1"
-  local key="$2"
-  local container="$3"
-  local sample_count="${4:-5}"
+  local container="$2"
+  local sample_count="${3:-5}"
 
   log "Checking replication status for blobs in '${container}'..."
   local blobs
   blobs=$(az storage blob list \
     --account-name "$account" \
-    --account-key "$key" \
+    --auth-mode login \
     --container-name "$container" \
     --num-results "$sample_count" \
     --query "[].name" -o tsv 2>/dev/null || echo "")
@@ -47,7 +46,7 @@ check_blob_replication_status() {
     local status
     status=$(az storage blob show \
       --account-name "$account" \
-      --account-key "$key" \
+      --auth-mode login \
       --container-name "$container" \
       --name "$blob" \
       --query "properties.replicationStatus" -o tsv 2>/dev/null || echo "unknown")
@@ -105,11 +104,7 @@ main() {
   require_tool jq
 
   # ── Get account info ────────────────────────────
-  local src_key src_id
-  src_key=$(az storage account keys list \
-    --account-name "$SOURCE_STORAGE" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query "[0].value" -o tsv)
+  local src_id
   src_id=$(az storage account show \
     --name "$SOURCE_STORAGE" \
     --resource-group "$RESOURCE_GROUP" \
@@ -119,7 +114,7 @@ main() {
   log "═══ Blob Replication Status (sampled) ═══"
   for i in $(seq -w 1 "$CONTAINER_COUNT"); do
     local cname="${SOURCE_CONTAINER_PREFIX}-${i}"
-    check_blob_replication_status "$SOURCE_STORAGE" "$src_key" "$cname" 5
+    check_blob_replication_status "$SOURCE_STORAGE" "$cname" 5
   done
 
   # ── Query Azure Monitor metrics ─────────────────

@@ -68,11 +68,6 @@ main() {
 
   # ── Create source containers ────────────────────
   log "Creating ${CONTAINER_COUNT} source container(s)..."
-  local src_key
-  src_key=$(az storage account keys list \
-    --account-name "$SOURCE_STORAGE" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query "[0].value" -o tsv)
 
   for i in $(seq -w 1 "$CONTAINER_COUNT"); do
     local cname="${SOURCE_CONTAINER_PREFIX}-${i}"
@@ -80,7 +75,7 @@ main() {
     exists=$(az storage container exists \
       --name "$cname" \
       --account-name "$SOURCE_STORAGE" \
-      --account-key "$src_key" \
+      --auth-mode login \
       --query "exists" -o tsv 2>/dev/null || echo "false")
     if [[ "$exists" == "true" ]]; then
       ok "Container '${cname}' already exists — reusing"
@@ -88,7 +83,7 @@ main() {
       run_or_dry "az storage container create \
         --name '${cname}' \
         --account-name '${SOURCE_STORAGE}' \
-        --account-key '${src_key}' \
+        --auth-mode login \
         --output none"
       ok "Container '${cname}' created"
     fi

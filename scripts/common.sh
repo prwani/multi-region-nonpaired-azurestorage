@@ -49,17 +49,25 @@ load_config() {
   local config_file="${REPO_ROOT}/config.env"
   if [[ -f "$config_file" ]]; then
     # Source config.env but don't override existing env vars
-    while IFS='=' read -r key value; do
+    while IFS= read -r line; do
       # Skip comments and empty lines
-      [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-      # Trim whitespace
-      key="$(echo "$key" | xargs)"
-      value="$(echo "$value" | sed 's/^["'\''"]//;s/["'\''"]$//' | xargs)"
+      [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+      # Strip inline comments (anything after # outside quotes)
+      line="$(echo "$line" | sed 's/[[:space:]]*#.*//')"
+      # Must contain =
+      [[ "$line" != *=* ]] && continue
+      local key="${line%%=*}"
+      local value="${line#*=}"
+      # Trim whitespace from key
+      key="$(echo "$key" | tr -d '[:space:]')"
+      # Trim quotes and whitespace from value
+      value="$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^["'\''"]//;s/["'\''"]$//')"
+      [[ -z "$key" ]] && continue
       # Only set if not already defined (env var takes precedence)
       if [[ -z "${!key+x}" ]]; then
         export "$key=$value"
       fi
-    done < <(grep -v '^\s*#' "$config_file" | grep '=')
+    done < "$config_file"
   fi
 
   # Apply built-in defaults for anything still unset
@@ -79,9 +87,10 @@ load_config() {
   : "${ACR_NAME:=}"
   : "${ACI_PREFIX:=azdatamaker}"
 
-  # Auto-generate names with random suffix if blank
+  # Auto-generate names with a stable suffix derived from resource group name
+  # This ensures all scripts produce the same names without needing state files
   local suffix
-  suffix="$(echo $RANDOM | md5sum | head -c 6)"
+  suffix="$(echo -n "${RESOURCE_GROUP}" | md5sum | head -c 6)"
   : "${SOURCE_STORAGE:=objreplsrc${suffix}}"
   : "${DEST_STORAGE:=objrepldst${suffix}}"
   : "${ACR_NAME:=objreplacr${suffix}}"

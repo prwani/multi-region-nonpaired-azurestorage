@@ -65,6 +65,7 @@ main() {
       --name '${aci_name}' \
       --resource-group '${RESOURCE_GROUP}' \
       --location '${SOURCE_REGION}' \
+      --os-type Linux \
       --cpu 1 \
       --memory 1 \
       --registry-login-server '${acr_server}' \
