@@ -97,3 +97,21 @@ This project sets up **Azure Blob Storage Object Replication** between two non-p
 - A source account can replicate to at most **2 destination accounts**
 - Priority replication can only be enabled on **1 policy per source account**
 - Cross-tenant replication requires full resource IDs and `AllowCrossTenantReplication = true`
+
+## Cross-Platform Support
+
+All scripts are available in both **Bash** (`.sh`) and **PowerShell** (`.ps1`):
+
+| Script | Bash | PowerShell |
+|--------|------|-----------|
+| Shared utilities | `common.sh` | `common.ps1` |
+| Create storage | `01-create-storage.sh` | `01-create-storage.ps1` |
+| Enable prerequisites | `02-enable-prereqs.sh` | `02-enable-prereqs.ps1` |
+| Setup replication | `03-setup-replication.sh` | `03-setup-replication.ps1` |
+| Ingest data (bench) | `bench-01-ingest-data.sh` | `bench-01-ingest-data.ps1` |
+| Continue ingestion (bench) | `bench-02-continue-ingestion.sh` | `bench-02-continue-ingestion.ps1` |
+| Monitor replication (bench) | `bench-03-monitor-replication.sh` | `bench-03-monitor-replication.ps1` |
+| Run all | `setup-all.sh` | `setup-all.ps1` |
+| Cleanup | `cleanup.sh` | `cleanup.ps1` |
+
+Both versions use the same `config.env` file and support equivalent CLI parameters.

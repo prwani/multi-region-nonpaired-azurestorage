@@ -6,6 +6,8 @@ When you need your Azure Blob Storage data available in multiple regions — for
 
 **Azure Object Replication** gives you the flexibility to replicate block blobs between *any* two Azure regions, on your terms. This guide walks you through setting it up between Sweden Central and Norway East (non-paired regions), generating test data, and measuring replication performance.
 
+All scripts are provided in both **Bash** and **PowerShell**, so you can run them on **Windows, macOS, or Linux**.
+
 ---
 
 ## Why Object Replication?
@@ -81,17 +83,21 @@ The following diagram shows all components in this demo. **Production components
 
 - **Azure subscription** with Contributor access
 - **Azure CLI** (`az`) — [Install guide](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
-- **jq** — JSON processor ([install](https://jqlang.github.io/jq/download/))
-- **bc** — Calculator (usually pre-installed on Linux/macOS)
+- **PowerShell 7.0+** *(for PowerShell scripts)* — [Install guide](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell) (cross-platform: Windows/macOS/Linux)
+- **jq** — JSON processor ([install](https://jqlang.github.io/jq/download/)) *(Bash scripts only)*
+- **bc** — Calculator (usually pre-installed on Linux/macOS) *(Bash scripts only)*
 
+**Bash:**
 ```bash
-# Verify tools
-az --version
-jq --version
-bc --version
-
-# Login
+az --version && jq --version && bc --version
 az login
+```
+
+**PowerShell:**
+```powershell
+pwsh --version
+az version
+Connect-AzAccount  # or: az login
 ```
 
 ---
@@ -100,15 +106,22 @@ az login
 
 The fastest way to get everything running — infrastructure, test data, replication, and monitoring:
 
+**Bash:**
 ```bash
-# Clone the repo
 git clone https://github.com/<your-org>/multi-region-nonpaired-azurestorage.git
 cd multi-region-nonpaired-azurestorage
 
 # (Optional) Edit config.env to customize regions, data size, etc.
 
-# Run everything
 ./scripts/setup-all.sh
+```
+
+**PowerShell:**
+```powershell
+git clone https://github.com/<your-org>/multi-region-nonpaired-azurestorage.git
+cd multi-region-nonpaired-azurestorage
+
+./scripts/setup-all.ps1
 ```
 
 This runs all steps in sequence:
@@ -120,13 +133,25 @@ This runs all steps in sequence:
 6. Monitors replication metrics
 
 **Production-only setup** (no benchmarking):
+
+**Bash:**
 ```bash
 ./scripts/setup-all.sh --skip-benchmark
 ```
+**PowerShell:**
+```powershell
+./scripts/setup-all.ps1 -SkipBenchmark
+```
 
 **Custom data size and regions:**
+
+**Bash:**
 ```bash
 ./scripts/setup-all.sh --data-size-gb 10 --source-region eastus --dest-region westus
+```
+**PowerShell:**
+```powershell
+./scripts/setup-all.ps1 -DataSizeGb 10 -SourceRegion eastus -DestRegion westus
 ```
 
 ---
@@ -135,8 +160,13 @@ This runs all steps in sequence:
 
 ### Step 1: Create Storage Accounts
 
+**Bash:**
 ```bash
 ./scripts/01-create-storage.sh
+```
+**PowerShell:**
+```powershell
+./scripts/01-create-storage.ps1
 ```
 
 This creates:
@@ -148,8 +178,13 @@ Both accounts use **Standard_LRS** (Locally Redundant Storage) — you don't nee
 
 ### Step 2: Enable Prerequisites
 
+**Bash:**
 ```bash
 ./scripts/02-enable-prereqs.sh
+```
+**PowerShell:**
+```powershell
+./scripts/02-enable-prereqs.ps1
 ```
 
 Object Replication requires:
@@ -160,8 +195,13 @@ This script also creates the source blob containers (`source-01` through `source
 
 ### Step 3 (Benchmarking): Ingest Test Data
 
+**Bash:**
 ```bash
 ./scripts/bench-01-ingest-data.sh
+```
+**PowerShell:**
+```powershell
+./scripts/bench-01-ingest-data.ps1
 ```
 
 Before setting up replication, we ingest ~1 GB of test data to simulate a real-world scenario where data already exists. This lets us measure the **historical catchup** phase.
@@ -172,14 +212,25 @@ The script:
 3. Deploys ACI instances to generate files into source containers
 
 **Customize the data volume:**
+
+**Bash:**
 ```bash
 ./scripts/bench-01-ingest-data.sh --data-size-gb 10
+```
+**PowerShell:**
+```powershell
+./scripts/bench-01-ingest-data.ps1 -DataSizeGb 10
 ```
 
 ### Step 4: Set Up Object Replication
 
+**Bash:**
 ```bash
 ./scripts/03-setup-replication.sh
+```
+**PowerShell:**
+```powershell
+./scripts/03-setup-replication.ps1
 ```
 
 This is the core step:
@@ -192,16 +243,26 @@ Since we set **copy scope = all objects**, the existing ~1 GB of data starts rep
 
 ### Step 5 (Benchmarking): Continue Ingestion
 
+**Bash:**
 ```bash
 ./scripts/bench-02-continue-ingestion.sh
+```
+**PowerShell:**
+```powershell
+./scripts/bench-02-continue-ingestion.ps1
 ```
 
 After replication is active, this generates additional data to measure **ongoing replication latency** (as opposed to historical catchup).
 
 ### Step 6 (Benchmarking): Monitor Replication
 
+**Bash:**
 ```bash
 ./scripts/bench-03-monitor-replication.sh
+```
+**PowerShell:**
+```powershell
+./scripts/bench-03-monitor-replication.ps1
 ```
 
 This queries:
@@ -232,12 +293,18 @@ Object Replication supports two modes, configurable via `REPLICATION_MODE` in `c
 - Cross-continent source/destination pairs
 - Accounts larger than 5 PB or with more than 10 billion blobs
 
+**Bash:**
 ```bash
 # Switch to priority mode
 ./scripts/03-setup-replication.sh --replication-mode priority
 
 # Or in config.env
 REPLICATION_MODE="priority"
+```
+
+**PowerShell:**
+```powershell
+./scripts/03-setup-replication.ps1 -ReplicationMode priority
 ```
 
 ---
@@ -252,12 +319,18 @@ REPLICATION_MODE="priority"
 | 10 GB | Moderate performance test | ~30 min |
 | 50+ GB | Stress test / production simulation | ~2+ hours |
 
+**Bash:**
 ```bash
 # Adjust in config.env
 DATA_SIZE_GB="10"
 
 # Or via CLI
 ./scripts/bench-01-ingest-data.sh --data-size-gb 10 --aci-count 3
+```
+
+**PowerShell:**
+```powershell
+./scripts/bench-01-ingest-data.ps1 -DataSizeGb 10 -AciCount 3
 ```
 
 ### Measuring Historical Catchup
@@ -299,9 +372,16 @@ Navigate to **Storage Account → Monitoring → Metrics** and add:
 
 Remove all resources when done:
 
+**Bash:**
 ```bash
 ./scripts/cleanup.sh        # Interactive confirmation
 ./scripts/cleanup.sh --yes  # Skip confirmation
+```
+
+**PowerShell:**
+```powershell
+./scripts/cleanup.ps1       # Interactive confirmation
+./scripts/cleanup.ps1 -Yes  # Skip confirmation
 ```
 
 > **Important:** Run cleanup promptly after benchmarking to avoid ongoing charges.
@@ -332,7 +412,7 @@ These resources are only needed for performance testing and should be deleted af
 | **Azure Container Registry** | Standard SKU hosting + image storage | Delete via `cleanup.sh` when done |
 | **Azure Container Instances** | Per-second vCPU + memory | Billed only while AzDataMaker runs |
 
-> **Tip:** Run `./scripts/cleanup.sh` promptly after benchmarking. ACR and ACI are not needed beyond testing.
+> **Tip:** Run `./scripts/cleanup.sh` (or `./scripts/cleanup.ps1`) promptly after benchmarking. ACR and ACI are not needed beyond testing.
 
 **Pricing references:**
 - [Azure Storage Pricing](https://azure.microsoft.com/pricing/details/storage/)

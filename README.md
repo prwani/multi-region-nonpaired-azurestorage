@@ -45,45 +45,47 @@ This repo provides:
 
 - **Azure subscription** with Contributor access
 - **Azure CLI** installed and logged in (`az login`)
-- **jq** installed (for JSON processing)
-- **bc** installed (for arithmetic in shell scripts)
+- **PowerShell 7.0+** *or* **Bash 4+** — all scripts ship in both `.sh` and `.ps1` variants
+- **jq** / **bc** (Bash only — PowerShell scripts use built-in JSON and math)
+
+> Scripts work on **Windows, macOS, and Linux**. Use whichever shell you prefer.
 
 ## Quick Start
 
 ### Option A: 1-command setup (core + benchmarking)
 
+**Bash:**
 ```bash
-# Edit config.env with your preferences, then:
 ./scripts/setup-all.sh
+```
+
+**PowerShell:**
+```powershell
+./scripts/setup-all.ps1
 ```
 
 ### Option B: Core setup only (production-like, no benchmarking)
 
+**Bash:**
 ```bash
 ./scripts/setup-all.sh --skip-benchmark
 ```
 
+**PowerShell:**
+```powershell
+./scripts/setup-all.ps1 -SkipBenchmark
+```
+
 ### Option C: Step-by-step
 
-```bash
-# 1. Create resource group + storage accounts
-./scripts/01-create-storage.sh
-
-# 2. Enable change feed, blob versioning, create source containers
-./scripts/02-enable-prereqs.sh
-
-# 3. (Benchmarking) Ingest test data BEFORE replication
-./scripts/bench-01-ingest-data.sh
-
-# 4. Set up object replication policy
-./scripts/03-setup-replication.sh
-
-# 5. (Benchmarking) Continue ingestion to test ongoing replication
-./scripts/bench-02-continue-ingestion.sh
-
-# 6. (Benchmarking) Monitor replication metrics
-./scripts/bench-03-monitor-replication.sh
-```
+| Step | Bash | PowerShell |
+|------|------|------------|
+| 1. Create resource group + storage | `./scripts/01-create-storage.sh` | `./scripts/01-create-storage.ps1` |
+| 2. Enable change feed, versioning, containers | `./scripts/02-enable-prereqs.sh` | `./scripts/02-enable-prereqs.ps1` |
+| 3. *(Bench)* Ingest test data before replication | `./scripts/bench-01-ingest-data.sh` | `./scripts/bench-01-ingest-data.ps1` |
+| 4. Set up object replication policy | `./scripts/03-setup-replication.sh` | `./scripts/03-setup-replication.ps1` |
+| 5. *(Bench)* Continue ingestion | `./scripts/bench-02-continue-ingestion.sh` | `./scripts/bench-02-continue-ingestion.ps1` |
+| 6. *(Bench)* Monitor replication metrics | `./scripts/bench-03-monitor-replication.sh` | `./scripts/bench-03-monitor-replication.ps1` |
 
 ## Configuration
 
@@ -101,10 +103,18 @@ All settings live in **one file**: [`config.env`](config.env). Override via CLI 
 
 **CLI override examples:**
 
+**Bash:**
 ```bash
 ./scripts/01-create-storage.sh --source-region westeurope --dest-region uksouth
 ./scripts/bench-01-ingest-data.sh --data-size-gb 10 --aci-count 3
 ./scripts/03-setup-replication.sh --replication-mode priority
+```
+
+**PowerShell:**
+```powershell
+./scripts/01-create-storage.ps1 -SourceRegion westeurope -DestRegion uksouth
+./scripts/bench-01-ingest-data.ps1 -DataSizeGb 10 -AciCount 3
+./scripts/03-setup-replication.ps1 -ReplicationMode priority
 ```
 
 **Precedence:** CLI flags > environment variables > config.env > built-in defaults
@@ -121,16 +131,41 @@ Switch modes:
 # In config.env
 REPLICATION_MODE="priority"
 
-# Or via CLI
-./scripts/03-setup-replication.sh --replication-mode priority
+# Or via CLI (Bash / PowerShell)
+./scripts/03-setup-replication.sh  --replication-mode priority
+./scripts/03-setup-replication.ps1 -ReplicationMode priority
 ```
 
 ## Cleanup
 
+**Bash:**
 ```bash
-./scripts/cleanup.sh        # Interactive confirmation
-./scripts/cleanup.sh --yes  # Skip confirmation
-./scripts/cleanup.sh --dry-run  # Preview
+./scripts/cleanup.sh              # Interactive confirmation
+./scripts/cleanup.sh --yes        # Skip confirmation
+./scripts/cleanup.sh --dry-run    # Preview
+```
+
+**PowerShell:**
+```powershell
+./scripts/cleanup.ps1             # Interactive confirmation
+./scripts/cleanup.ps1 -Yes        # Skip confirmation
+./scripts/cleanup.ps1 -DryRun     # Preview
+```
+
+## Repo Structure
+
+```
+scripts/
+  setup-all.{sh,ps1}                # Full setup (core + optional benchmarking)
+  01-create-storage.{sh,ps1}        # Resource group + storage accounts
+  02-enable-prereqs.{sh,ps1}        # Change feed, versioning, containers
+  03-setup-replication.{sh,ps1}     # Object replication policy
+  bench-01-ingest-data.{sh,ps1}     # Generate test blobs via ACI
+  bench-02-continue-ingestion.{sh,ps1}
+  bench-03-monitor-replication.{sh,ps1}
+  cleanup.{sh,ps1}                  # Tear down all resources
+config.env                          # Shared configuration (both shells)
+Blog.md                             # Publishable walkthrough
 ```
 
 ## Blog Post
