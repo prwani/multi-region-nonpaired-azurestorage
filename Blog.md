@@ -1,452 +1,279 @@
 # Cross-Region Blob Replication Without Paired Regions: A Practical Guide to Azure Object Replication
 
-## Introduction
+When Azure's built-in paired-region model does not match your data residency, latency, or regional design requirements, **Azure Blob Object Replication** gives you a more deliberate option: replicate block blobs between storage accounts in the regions you choose.
 
-When you need your Azure Blob Storage data available in multiple regions — for disaster recovery, latency optimization, or compliance — Azure offers several options. The most common is **Geo-Redundant Storage (GRS)**, which automatically replicates data to a paired region. But what if the paired region doesn't meet your needs?
+This repo demonstrates that pattern with a **CLI-first main track** and a **production-oriented AVM companion track**. The main track is still the best way to learn the feature, run benchmarks, and see how replication behaves in practice. The companion track shows how to provision the storage foundation with AVM/Bicep and then activate replication as a separate operational step.
 
-**Azure Object Replication** gives you the flexibility to replicate block blobs between *any* two Azure regions, on your terms. This guide walks you through setting it up between Sweden Central and Norway East (non-paired regions), generating test data, and measuring replication performance.
+## Who this guide is for
 
-All scripts are provided in both **Bash** and **PowerShell**, so you can run them on **Windows, macOS, or Linux**.
+| Audience | What to focus on |
+|---|---|
+| **Architects** | Region choice, data residency, security posture, selective replication, and the decision between the CLI demo and AVM companion |
+| **Developers** | Fast setup, CLI examples, default local benchmarking, and how to measure historical catchup and ongoing replication |
+| **DevOps / platform teams** | RBAC, monitoring, managed identity, read-only destination behavior, CMK/private endpoint options, and cutover caveats |
 
----
+## Why object replication instead of GRS?
 
-## Why Object Replication?
+Azure GRS and RA-GRS are strong defaults when the paired region is acceptable and the platform-managed behavior is enough. They are weaker fits when you need to control **where** replicated data lives and **what** gets replicated.
 
-### The Limitations of GRS and Paired Regions
+| Question | GRS / RA-GRS | Object Replication |
+|---|---|---|
+| Destination region | Fixed Azure paired region | **Any supported region pair** |
+| Scope | Whole account | **Per container, with optional prefix filters** |
+| Data residency control | Limited | **High** |
+| Benchmark visibility | Limited | **Better operational visibility through metrics and blob status** |
+| Priority/SLA option | No | **Priority replication available for supported scenarios** |
 
-Azure's GRS and RA-GRS (Read-Access Geo-Redundant Storage) are excellent for automatic geo-redundancy, but they come with constraints tied to the **paired region model**:
+Object replication is especially useful when you want to:
 
-1. **No region choice** — GRS replicates only to Azure's pre-determined paired region. You cannot select a different destination. If Sweden Central is paired with Sweden South, that's your only option.
+- keep data in a specific geography or compliance boundary
+- replicate to a non-paired region for latency or operational reasons
+- replicate only selected containers instead of an entire account
+- measure replication throughput and backlog more directly
 
-2. **Data residency concerns** — Your paired region may be in a different country or regulatory jurisdiction. For organizations bound by EU/EEA data residency requirements, this can be a blocker if the paired region falls outside compliant boundaries.
+## Two tracks in this repo
 
-3. **Geographic distance** — Paired regions are chosen by Microsoft for maximum physical separation (for disaster resilience), which means higher latency for read access from the secondary.
+| Track | What it is for | Main entry points |
+|---|---|---|
+| **CLI-first main track** | Learning, demos, hands-on setup, and benchmarking | [`README.md`](README.md), [`docs/architecture.md`](docs/architecture.md), `scripts/*.sh`, `scripts/*.ps1` |
+| **AVM companion track** | Production-oriented provisioning baseline with optional monitoring, CMK, and private endpoints | [`infra/avm/README.md`](infra/avm/README.md), [`Blog2.md`](Blog2.md), `infra/avm/main.bicep` |
 
-4. **Limited service availability** — Some newer Azure regions have limited or no traditional pairing. Regions like Sweden South may have fewer services available, making the paired region less practical for active workloads.
+The most important point is simple: **the main repo is still CLI-first**. The AVM path complements it; it does not replace it.
 
-5. **All-or-nothing replication** — GRS replicates the entire storage account. You can't selectively replicate specific containers or filter by blob prefix.
+## How the current implementation works
 
-6. **No control over timing** — GRS replication is managed entirely by Azure with no SLA on replication lag (RPO is typically ~15 minutes but not guaranteed).
+The working implementation in this repo now behaves as follows:
 
-### What Object Replication Offers Instead
+- the source and destination storage accounts are deployed in configurable non-paired regions (the sample defaults remain Sweden Central → Norway East)
+- the source account has **change feed** and **blob versioning** enabled
+- the destination account has **blob versioning** enabled
+- source containers default to names such as `source-01`, `source-02`, and destination containers to `dest-01`, `dest-02`
+- CLI storage account names come from `config.env`, and if you leave them blank the scripts derive stable names such as `objreplsrc736208` and `objrepldst736208` from the resource group name
+- the AVM companion requires explicit storage account names in `.bicepparam` files instead of auto-generated names
+- both Bash and PowerShell use the same replication pattern: create the first rule on the destination account, add the remaining rules there, then create the matching source-side policy
 
-| Capability | GRS | Object Replication |
-|-----------|-----|-------------------|
-| Destination region | Fixed (paired only) | **Any region** |
-| Granularity | Entire account | **Per-container, with prefix filters** |
-| Data types | All blob types | Block blobs only |
-| Cost model | Built into storage SKU (GRS/RA-GRS) | LRS + per-transaction + egress |
-| Priority SLA | None | **99% within 15 min** (priority mode, same continent) |
-| Cross-tenant | No | Yes (with configuration) |
-| Multiple destinations | No | Up to 2 destination accounts |
+The repo also intentionally sets the copy scope to **all objects** by using:
 
-Object Replication is ideal when you need:
-- Replication to a **non-paired region** (compliance, latency, or preference)
-- **Selective replication** (only certain containers or prefixes)
-- **Cost control** (replicate only what matters, use LRS instead of GRS)
-- **Measurable replication performance** (built-in metrics)
-
----
-
-## Architecture
-
-The following diagram shows all components in this demo. **Production components** (solid boxes) are what you'd use in a real deployment. **Benchmarking components** (dashed boxes) are only for performance testing.
-
-```
-┌─── Sweden Central ──────────────────────┐                    ┌─── Norway East ──────────────────────────┐
-│                                          │                    │                                          │
-│  ┌────────────────────────────────────┐  │   Object Repl.    │  ┌────────────────────────────────────┐  │
-│  │  Source Storage Account            │  │  ═══════════════▶ │  │  Destination Storage Account       │  │
-│  │                                    │  │  [default|priority]│  │                                    │  │
-│  │  ┌──────────┐  ┌──────────┐       │  │                    │  │  ┌──────────┐  ┌──────────┐       │  │
-│  │  │source-01 │  │source-02 │  ...  │  │                    │  │  │ dest-01  │  │ dest-02  │  ...  │  │
-│  │  └──────────┘  └──────────┘       │  │                    │  │  └──────────┘  └──────────┘       │  │
-│  │                                    │  │                    │  │                                    │  │
-│  │  ✔ Change feed    ✔ Versioning    │  │                    │  │  ✔ Versioning                     │  │
-│  └────────────────────────────────────┘  │                    │  └────────────────────────────────────┘  │
-│           ▲                              │                    │                                          │
-│           │                              │                    └──────────────────────────────────────────┘
-│  ┌ ─ ─ ─ ┴ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐  │
-│    Benchmarking only                     │
-│  │ ┌─────┐       ┌──────────────────┐│  │
-│   │ ACR │──────▶│ ACI (AzDataMaker)│    │
-│  │ └─────┘       │ generates test   ││  │
-│                   │ data             │    │
-│  │                └──────────────────┘│  │
-│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
-└──────────────────────────────────────────┘
+```text
+--min-creation-time '1601-01-01T00:00:00Z'
 ```
 
----
+That matters because the Azure default is often misunderstood. If you leave copy-scope at the default behavior, only **new** objects replicate and historical data is skipped. This repo explicitly enables historical catchup so you can seed data first and then measure how quickly the backlog closes.
 
-## Prerequisites
+## Walkthrough: the CLI-first main track
 
-- **Azure subscription** with Contributor access
-- **Azure CLI** (`az`) — [Install guide](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
-- **PowerShell 7.0+** *(for PowerShell scripts)* — [Install guide](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell) (cross-platform: Windows/macOS/Linux)
-- **jq** — JSON processor ([install](https://jqlang.github.io/jq/download/)) *(Bash scripts only)*
-- **bc** — Calculator (usually pre-installed on Linux/macOS) *(Bash scripts only)*
+If you want the fastest path to a working lab, start here.
 
-**Bash:**
+### Fastest path: one command
+
+**Bash**
+
 ```bash
-az --version && jq --version && bc --version
-az login
-```
-
-**PowerShell:**
-```powershell
-pwsh --version
-az version
-Connect-AzAccount  # or: az login
-```
-
----
-
-## Option A: 1-Command Setup
-
-The fastest way to get everything running — infrastructure, test data, replication, and monitoring:
-
-**Bash:**
-```bash
-git clone https://github.com/<your-org>/multi-region-nonpaired-azurestorage.git
-cd multi-region-nonpaired-azurestorage
-
-# (Optional) Edit config.env to customize regions, data size, etc.
-
 ./scripts/setup-all.sh
 ```
 
-**PowerShell:**
-```powershell
-git clone https://github.com/<your-org>/multi-region-nonpaired-azurestorage.git
-cd multi-region-nonpaired-azurestorage
+**PowerShell**
 
+```powershell
 ./scripts/setup-all.ps1
 ```
 
-This runs all steps in sequence:
-1. Creates resource group + storage accounts
-2. Enables change feed + blob versioning + creates containers
-3. Ingests test data via AzDataMaker (benchmarking)
-4. Sets up object replication policy
-5. Continues ingestion to test ongoing replication
-6. Monitors replication metrics
+To skip the benchmark pieces and focus on the replication configuration only:
 
-**Production-only setup** (no benchmarking):
+**Bash**
 
-**Bash:**
 ```bash
 ./scripts/setup-all.sh --skip-benchmark
 ```
-**PowerShell:**
+
+**PowerShell**
+
 ```powershell
 ./scripts/setup-all.ps1 -SkipBenchmark
 ```
 
-**Custom data size and regions:**
+### Step-by-step flow
 
-**Bash:**
+| Step | Bash | PowerShell | What it does |
+|---|---|---|---|
+| 1 | `./scripts/01-create-storage.sh` | `./scripts/01-create-storage.ps1` | Creates the resource group and the two storage accounts |
+| 2 | `./scripts/02-enable-prereqs.sh` | `./scripts/02-enable-prereqs.ps1` | Enables change feed/versioning and creates the source containers |
+| 3 *(optional benchmark)* | `./scripts/bench-01-ingest-data.sh` | `./scripts/bench-01-ingest-data.ps1` | Seeds data before replication so you can measure historical catchup |
+| 4 | `./scripts/03-setup-replication.sh` | `./scripts/03-setup-replication.ps1` | Creates destination containers and activates object replication |
+
+> **Note:** Azure CLI limits individual `or-policy rule add` calls to 10 rules per policy. When you configure more than 10 container pairs, both the CLI demo scripts and the AVM companion activation script (`infra/avm/create-object-replication.sh`) automatically switch to a [JSON policy definition file](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-configure?tabs=azure-cli#configure-object-replication-using-a-json-file) that defines all rules in a single `or-policy create` call.
+| 5 *(optional benchmark)* | `./scripts/bench-02-continue-ingestion.sh` | `./scripts/bench-02-continue-ingestion.ps1` | Adds new data after replication starts to measure ongoing latency |
+| 6 *(optional benchmark)* | `./scripts/bench-03-monitor-replication.sh` | `./scripts/bench-03-monitor-replication.ps1` | Reads blob status and Azure Monitor metrics |
+
+## Benchmarking: local first, AzDataMaker optional
+
+One of the biggest documentation changes in the repo is the benchmarking story.
+
+**Today, the default benchmark path in both Bash and PowerShell is local file generation plus `az storage blob upload --auth-mode login`.** That means the out-of-the-box path is simple:
+
+- generate files locally on the operator workstation
+- upload them with Azure CLI using the signed-in Azure identity
+- watch object replication move them to the destination side
+
+This is the fastest way to do a benchmark without also paying for or operating Azure Container Registry and Azure Container Instances.
+
+### Optional AzDataMaker path
+
+If you want scale-out data generation, the repo still supports AzDataMaker as an **optional** path:
+
+- **Bash:** `--use-azdatamaker`
+- **PowerShell:** `-UseAzDataMaker` or `--use-azdatamaker`
+
+In the current implementation, that path:
+
+- builds from [`https://github.com/Azure/AzDataMaker.git`](https://github.com/Azure/AzDataMaker.git)
+- builds and stores the image in Azure Container Registry
+- runs Azure Container Instances with a **system-assigned managed identity**
+- passes `StorageAccountUri` into the container
+- assigns **Storage Blob Data Contributor** on the **source storage account** to that managed identity
+
+Shared key authentication is no longer the main story here. The two benchmark modes are now:
+
+- **local + login auth** by default
+- **AzDataMaker + managed identity** when explicitly requested
+
+### What to measure
+
+There are two useful benchmark patterns:
+
+1. **Historical catchup** — run `bench-01-*` before replication is enabled, then activate replication and observe how long pre-existing data takes to complete.
+2. **Ongoing replication latency** — enable replication first, then run `bench-02-*` and watch how quickly new blobs move.
+
+The copy-all setting (`1601-01-01T00:00:00Z`) is what makes the first measurement possible.
+
+## Security guidance
+
+Security is where the demo and the companion track intentionally diverge.
+
+### 1) Login-based authentication is the baseline
+
+The interactive experience assumes you are signed in with Azure CLI:
+
 ```bash
-./scripts/setup-all.sh --data-size-gb 10 --source-region eastus --dest-region westus
-```
-**PowerShell:**
-```powershell
-./scripts/setup-all.ps1 -DataSizeGb 10 -SourceRegion eastus -DestRegion westus
+az login
 ```
 
----
-
-## Option B: Step-by-Step Setup
-
-### Step 1: Create Storage Accounts
-
-**Bash:**
-```bash
-./scripts/01-create-storage.sh
-```
-**PowerShell:**
-```powershell
-./scripts/01-create-storage.ps1
-```
-
-This creates:
-- A resource group in the source region
-- A source storage account (StorageV2, Standard_LRS, Hot) in Sweden Central
-- A destination storage account in Norway East
-
-Both accounts use **Standard_LRS** (Locally Redundant Storage) — you don't need GRS because Object Replication handles the cross-region copy.
-
-### Step 2: Enable Prerequisites
-
-**Bash:**
-```bash
-./scripts/02-enable-prereqs.sh
-```
-**PowerShell:**
-```powershell
-./scripts/02-enable-prereqs.ps1
-```
-
-Object Replication requires:
-- **Change feed** on the source account — captures blob write/delete events
-- **Blob versioning** on both accounts — tracks blob versions for consistent replication
-
-This script also creates the source blob containers (`source-01` through `source-05` by default).
-
-### Step 3 (Benchmarking): Ingest Test Data
-
-**Bash:**
-```bash
-./scripts/bench-01-ingest-data.sh
-```
-**PowerShell:**
-```powershell
-./scripts/bench-01-ingest-data.ps1
-```
-
-Before setting up replication, we ingest ~1 GB of test data to simulate a real-world scenario where data already exists. This lets us measure the **historical catchup** phase.
-
-The script:
-1. Creates an Azure Container Registry
-2. Builds the [AzDataMaker](https://github.com/Azure/azdatamaker) container image
-3. Deploys ACI instances to generate files into source containers
-
-**Customize the data volume:**
-
-**Bash:**
-```bash
-./scripts/bench-01-ingest-data.sh --data-size-gb 10
-```
-**PowerShell:**
-```powershell
-./scripts/bench-01-ingest-data.ps1 -DataSizeGb 10
-```
-
-### Step 4: Set Up Object Replication
-
-**Bash:**
-```bash
-./scripts/03-setup-replication.sh
-```
-**PowerShell:**
-```powershell
-./scripts/03-setup-replication.ps1
-```
-
-This is the core step:
-1. Creates destination containers (`dest-01` through `dest-05`)
-2. Creates a replication policy on the destination account
-3. Adds rules for each container pair (source-01 → dest-01, etc.)
-4. Creates the matching policy on the source account
-
-Since we set **copy scope = all objects**, the existing ~1 GB of data starts replicating immediately (historical catchup).
-
-> **⚠️ Important: Copy Scope**
-> By default, object replication only copies **new blobs** created after the rule is established — pre-existing data is silently skipped. This is a common gotcha. Our scripts set the copy scope to "all objects" (`--min-creation-time '1601-01-01T00:00:00Z'`), ensuring both existing and future blobs are replicated. If you're setting this up manually in the Azure Portal, make sure to change the copy scope from "Copy only new objects" to "Copy all objects" in the container pair configuration.
-
-### Step 5 (Benchmarking): Continue Ingestion
-
-**Bash:**
-```bash
-./scripts/bench-02-continue-ingestion.sh
-```
-**PowerShell:**
-```powershell
-./scripts/bench-02-continue-ingestion.ps1
-```
-
-After replication is active, this generates additional data to measure **ongoing replication latency** (as opposed to historical catchup).
+The local benchmark path, container creation, and blob inspection use Azure AD-backed data-plane access through commands such as `az storage blob upload --auth-mode login`. In other words, **shared key authentication is not the default story anymore**.
 
-### Step 6 (Benchmarking): Monitor Replication
+### 2) The interactive user needs both control-plane and data-plane access
 
-**Bash:**
-```bash
-./scripts/bench-03-monitor-replication.sh
-```
-**PowerShell:**
-```powershell
-./scripts/bench-03-monitor-replication.ps1
-```
+The operator running the scripts typically needs:
 
-This queries:
-- **Blob-level replication status** — samples individual blobs for `complete`/`pending`/`failed`
-- **Azure Monitor metrics** — bytes and operations replicated
+- **Contributor or equivalent** on the target resource group or subscription so the scripts can create/update storage accounts, ACR, ACI, diagnostics, and replication policies
+- a data-plane blob role on the source and destination accounts or their containers so the scripts can create containers, upload data, list blobs, and inspect replication status
 
----
+The simplest documented baseline is **Storage Blob Data Contributor** on both storage accounts for the interactive user. You can narrow that model if your organization prefers split duties, but whatever principal runs the scripts still needs the permissions required by the steps you actually execute.
 
-## Default vs Priority Replication
+### 3) The AzDataMaker path uses managed identity
 
-Object Replication supports two modes, configurable via `REPLICATION_MODE` in `config.env` or `--replication-mode` CLI flag:
+When you opt into AzDataMaker, the benchmark automation identity is not your user account. Each ACI instance gets a **system-assigned managed identity**, receives `StorageAccountUri`, and is granted **Storage Blob Data Contributor** on the **source** storage account. That is a cleaner benchmark story than relying on shared keys or embedding credentials in containers.
 
-### Default Mode
-- **Async replication** with no guaranteed timeline
-- No additional per-GB cost beyond standard transactions and egress
-- Suitable for cost-sensitive or non-critical workloads
+### 4) Benchmarking posture and production posture are different by design
 
-### Priority Mode
-- **99% of objects replicated within 15 minutes** (SLA, same continent)
-- Automatically enables enhanced **OR metrics** (operations/bytes pending by time bucket)
-- Per-GB ingress cost on replicated data
-- Billing continues for **30 days after disabling**
-- Only **1 priority policy per source account**
+The CLI-first track is optimized for understanding the feature, iterating quickly, and measuring behavior. The AVM companion is optimized for a harder production baseline. In the AVM path:
 
-**SLA exclusions** (priority mode):
-- Objects larger than 5 GB
-- Objects modified more than 10 times per second
-- Cross-continent source/destination pairs
-- Accounts larger than 5 PB or with more than 10 billion blobs
+- `allowSharedKeyAccess` defaults to `false`
+- blob public access is disabled
+- HTTPS-only and minimum TLS 1.2 are enforced
+- infrastructure encryption is enabled
+- monitoring is built in, and CMK/private endpoints are optional integrations
 
-**Bash:**
-```bash
-# Switch to priority mode
-./scripts/03-setup-replication.sh --replication-mode priority
+That split is healthy. A benchmark lab and a production landing zone should not have identical priorities.
 
-# Or in config.env
-REPLICATION_MODE="priority"
-```
+## Operations guidance
 
-**PowerShell:**
-```powershell
-./scripts/03-setup-replication.ps1 -ReplicationMode priority
-```
+Replication is only useful if operations teams can prove it is healthy and understand its limits.
 
----
+### Metrics to monitor
 
-## Performance Benchmarking Guide
+| Signal | Why to watch it |
+|---|---|
+| `ObjectReplicationSourceBytesReplicated` | Baseline evidence that bytes are moving |
+| `ObjectReplicationSourceOperationsReplicated` | Confirms replicated operations and helps compare throughput across tests |
+| `Operations pending for replication` *(priority mode)* | Backlog signal for SLA-sensitive workloads |
+| `Bytes pending for replication` *(priority mode)* | Data backlog by age bucket in priority mode |
+| Blob `replicationStatus` samples (`complete`, `pending`, `failed`) | Useful per-object spot checks during validation or incident response |
+| Storage account metrics and blob service logs | Useful for access, network, and post-change validation, especially in the AVM path |
 
-### Choosing Your Data Volume
+### Read-only destination behavior
 
-| Size | Use Case | Approx. Time (ingestion) |
-|------|----------|-------------------------|
-| 1 GB | Quick functional test | ~5 min |
-| 10 GB | Moderate performance test | ~30 min |
-| 50+ GB | Stress test / production simulation | ~2+ hours |
+This is the operational caveat people forget most often: **destination containers become read-only once object replication is active**. That is why the AVM companion deliberately separates provisioning from activation. It lets teams review the deployment before making the destination part of a live replication topology.
 
-**Bash:**
-```bash
-# Adjust in config.env
-DATA_SIZE_GB="10"
+### Troubleshooting guide
 
-# Or via CLI
-./scripts/bench-01-ingest-data.sh --data-size-gb 10 --aci-count 3
-```
+If replication does not behave as expected, check these first:
 
-**PowerShell:**
-```powershell
-./scripts/bench-01-ingest-data.ps1 -DataSizeGb 10 -AciCount 3
-```
+- **Historical data not replicating?** Confirm the policy was created with the copy-all behavior (`--min-creation-time '1601-01-01T00:00:00Z'`).
+- **Uploads or blob inspection failing?** Check Azure AD login state, data-plane RBAC, and any storage firewall or private access restrictions.
+- **Replication policy issues?** Verify change feed is enabled on the source and versioning is enabled on both accounts.
+- **AzDataMaker issues?** Check the ACR build, ACI lifecycle state, managed identity assignment, `StorageAccountUri`, and the source-account role assignment.
+- **Post-hardening regressions?** After CMK, private endpoint, DNS, or firewall changes, re-test replication and diagnostics explicitly.
 
-### Measuring Historical Catchup
+### Failover and cutover caveats
 
-Historical catchup is the time taken to replicate pre-existing data after a replication policy is created.
+Object replication supports regional resilience, but it does **not** deliver a turnkey application failover workflow on its own.
 
-> **Note:** This measurement only works because our scripts set the copy scope to replicate **all objects** (`--min-creation-time '1601-01-01T00:00:00Z'`). With the default copy scope, pre-existing blobs would be ignored and there would be no historical catchup to measure.
+It does not automatically:
 
-1. Run `bench-01-ingest-data.sh` **before** `03-setup-replication.sh`
-2. Note the timestamp when replication is configured
-3. Run `bench-03-monitor-replication.sh` periodically until all blobs show `complete`
-4. The difference is your historical catchup time
+- switch application endpoints or DNS
+- move your application secrets or identities
+- make the destination writeable while the policy remains active
+- provide a full failback workflow after a cutover
 
-### Measuring Ongoing Replication Latency
+Treat object replication as one building block inside a broader DR or cutover plan, not the entire runbook.
 
-1. Ensure replication is active (`03-setup-replication.sh` completed)
-2. Run `bench-02-continue-ingestion.sh` to add new blobs
-3. Immediately run `bench-03-monitor-replication.sh` to track how quickly new blobs replicate
+## Cost guidance
 
-### Comparing Default vs Priority
+There are two different cost stories in this repo.
 
-Run the full benchmark twice:
-1. First with `REPLICATION_MODE="default"` — note catchup time and latency
-2. Clean up, then re-run with `REPLICATION_MODE="priority"`
-3. Compare results
+### Production-style object replication costs
 
-### Key Metrics in Azure Portal
+These are relevant regardless of whether you use the CLI track or the AVM track:
 
-Navigate to **Storage Account → Monitoring → Metrics** and add:
+- change feed costs on the source account
+- blob versioning storage on both sides
+- source-side reads and destination-side writes for replicated traffic
+- cross-region data transfer costs
+- **priority replication** charges when enabled
 
-| Metric | What It Shows |
-|--------|--------------|
-| `ObjectReplicationSourceBytesReplicated` | Total bytes replicated from source |
-| `ObjectReplicationSourceOperationsReplicated` | Total operations replicated |
-| Operations pending for replication *(priority only)* | Backlog by time bucket (0–5 min, 5–10 min, etc.) |
-| Bytes pending for replication *(priority only)* | Data backlog by time bucket |
+Priority replication deserves special care because the cost is not just “faster mode.” It adds a per-GB cost and the billing impact continues for **30 days after disabling**.
 
----
+### Benchmark-only costs
 
-## Cleanup
+The current default benchmark path is cheaper because it stays local and uses your CLI session. You only incur the Azure Storage costs associated with the objects you upload.
 
-Remove all resources when done:
+The **optional** AzDataMaker path adds:
 
-**Bash:**
-```bash
-./scripts/cleanup.sh        # Interactive confirmation
-./scripts/cleanup.sh --yes  # Skip confirmation
-```
+- Azure Container Registry cost
+- Azure Container Instances cost
 
-**PowerShell:**
-```powershell
-./scripts/cleanup.ps1       # Interactive confirmation
-./scripts/cleanup.ps1 -Yes  # Skip confirmation
-```
+That makes the local default path the better starting point for quick validation, while AzDataMaker is the right choice when you need scale or parallelism.
 
-> **Important:** Run cleanup promptly after benchmarking to avoid ongoing charges.
+## When to use the AVM companion track
 
----
+Use the AVM companion when the conversation changes from “show me the feature” to “show me a production-oriented baseline.”
 
-## Cost Considerations
+The companion path:
 
-### Production Costs (Object Replication)
+- provisions the storage foundation with `infra/avm/main.bicep`
+- supports optional monitoring, CMK, and private endpoints
+- keeps replication activation as a separate CLI step with `infra/avm/create-object-replication.sh`
 
-These costs apply to any production use of object replication:
+Start with:
 
-| Component | Cost Driver | Notes |
-|-----------|------------|-------|
-| **Change feed** | Per-log-event charge | Charged on the source account for each operation captured |
-| **Blob versioning** | Storage per version | Each version on source and destination counts as stored data |
-| **Object replication** | Read transactions (source) + write transactions (destination) | Standard transaction rates apply |
-| **Priority replication** | Per-GB ingress cost | Only if enabled; billing continues 30 days after disabling |
-| **Storage accounts (×2)** | Standard LRS storage | Rates may differ between regions |
-| **Data egress** | Cross-region bandwidth | Charged for data transferred from source to destination region |
+- [`infra/avm/README.md`](infra/avm/README.md) for deployment commands and parameter-file guidance
+- [`Blog2.md`](Blog2.md) for the architectural rationale and design trade-offs
 
-### Benchmarking-Only Costs (Not in Production)
+## Final take
 
-These resources are only needed for performance testing and should be deleted after benchmarking:
+Azure Object Replication is the right tool when you need more control than paired-region GRS can provide. This repo now presents that story in two useful ways:
 
-| Component | Cost Driver | Notes |
-|-----------|------------|-------|
-| **Azure Container Registry** | Standard SKU hosting + image storage | Delete via `cleanup.sh` when done |
-| **Azure Container Instances** | Per-second vCPU + memory | Billed only while AzDataMaker runs |
+- a **CLI-first main track** that is easy to learn, easy to benchmark, and honest about how replication behaves
+- an **AVM companion track** that shows how to provision a more production-oriented storage baseline and then activate replication deliberately
 
-> **Tip:** Run `./scripts/cleanup.sh` (or `./scripts/cleanup.ps1`) promptly after benchmarking. ACR and ACI are not needed beyond testing.
-
-**Pricing references:**
-- [Azure Storage Pricing](https://azure.microsoft.com/pricing/details/storage/)
-- [Azure Bandwidth Pricing](https://azure.microsoft.com/pricing/details/bandwidth/)
-- [Azure Container Registry Pricing](https://azure.microsoft.com/pricing/details/container-registry/)
-- [Azure Container Instances Pricing](https://azure.microsoft.com/pricing/details/container-instances/)
-
----
-
-## Conclusion & Next Steps
-
-You've now set up **Azure Object Replication** between non-paired regions, generated test data, and measured replication performance. This approach gives you:
-
-- **Region flexibility** — replicate to any region, not just paired ones
-- **Granular control** — per-container rules with prefix filters
-- **Measurable performance** — built-in metrics and optional SLA with priority mode
-- **Cost optimization** — use LRS + selective replication instead of GRS
-
-### Next Steps
-
-- **Add prefix filters** to replication rules to selectively replicate specific blob paths
-- **Configure lifecycle management** on the destination account to archive or delete old versions
-- **Set up alerts** on replication lag metrics for proactive monitoring
-- **Test failover** by pointing applications to the destination account
-- **Explore priority replication** if you need guaranteed replication times
-
-### References
-
-- [Object Replication Overview](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-overview)
-- [Configure Object Replication](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-configure)
-- [Priority Replication](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-priority-replication)
-- [AzDataMaker](https://github.com/Azure/azdatamaker)
+For architects, that means better control over region design and security boundaries. For developers, it means a simple path to reproduce and measure behavior. For DevOps teams, it means clearer RBAC, monitoring, and operational boundaries.
