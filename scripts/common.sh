@@ -26,6 +26,10 @@ dry()  { echo -e "${YELLOW}  [DRY-RUN]${NC} $*"; }
 # ── Globals ───────────────────────────────────────
 DRY_RUN=false
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AZDATAMAKER_GIT_URL="${AZDATAMAKER_GIT_URL:-https://github.com/Azure/AzDataMaker.git}"
+AZDATAMAKER_DOCKERFILE="${AZDATAMAKER_DOCKERFILE:-src/AzDataMaker/AzDataMaker/Dockerfile}"
+AZDATAMAKER_IMAGE="${AZDATAMAKER_IMAGE:-azdatamaker:latest}"
+STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE="${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE:-Storage Blob Data Contributor}"
 
 # ── Helpers ───────────────────────────────────────
 require_tool() {
@@ -151,7 +155,7 @@ compute_azdatamaker_params() {
   log "Data generation plan:"
   ok "Target size:       ~${est_size} GB"
   ok "Files:             ${FILE_COUNT} (${MIN_FILE_SIZE}–${MAX_FILE_SIZE} MiB each)"
-  ok "ACI instances:     ${ACI_COUNT} (${files_per_instance} files each)"
+  ok "ACI instances:     ${ACI_COUNT} (${files_per_instance} files each, AzDataMaker only)"
   ok "Containers:        ${CONTAINER_COUNT} (round-robin)"
 
   export FILE_COUNT
@@ -170,6 +174,287 @@ get_container_names() {
   echo "$names"
 }
 
+get_aci_name() {
+  local index="$1"
+  printf "%s-%02d" "$ACI_PREFIX" "$index"
+}
+
+wait_for_aci_principal_id() {
+  local aci_name="$1"
+
+  if $DRY_RUN; then
+    echo "<dry-run-principal-id>"
+    return 0
+  fi
+
+  local principal_id=""
+  for _ in $(seq 1 60); do
+    principal_id=$(az container show \
+      --name "$aci_name" \
+      --resource-group "$RESOURCE_GROUP" \
+      --query "identity.principalId" -o tsv 2>/dev/null || echo "")
+    if [[ -n "$principal_id" ]]; then
+      echo "$principal_id"
+      return 0
+    fi
+    sleep 5
+  done
+
+  err "Managed identity principalId for ACI '${aci_name}' was not available in time"
+  return 1
+}
+
+wait_for_aci_deleted() {
+  local aci_name="$1"
+
+  $DRY_RUN && return 0
+
+  for _ in $(seq 1 60); do
+    if ! az container show \
+      --name "$aci_name" \
+      --resource-group "$RESOURCE_GROUP" \
+      --query "id" -o tsv &>/dev/null; then
+      return 0
+    fi
+    sleep 5
+  done
+
+  err "Timed out waiting for ACI '${aci_name}' to delete"
+  return 1
+}
+
+aci_uses_managed_identity_storage_uri() {
+  local aci_name="$1"
+
+  local principal_id storage_uri
+  principal_id=$(az container show \
+    --name "$aci_name" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query "identity.principalId" -o tsv 2>/dev/null || echo "")
+  storage_uri=$(az container show \
+    --name "$aci_name" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query "containers[0].environmentVariables[?name=='StorageAccountUri'].value | [0]" -o tsv 2>/dev/null || echo "")
+
+  [[ -n "$principal_id" && -n "$storage_uri" ]]
+}
+
+ensure_storage_blob_data_contributor() {
+  local principal_id="$1"
+  local storage_account_id="$2"
+  local aci_name="${3:-managed-identity}"
+
+  if $DRY_RUN; then
+    dry "Would assign '${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE}' to '${aci_name}' (${principal_id}) on '${storage_account_id}'"
+    return 0
+  fi
+
+  local existing_count
+  existing_count=$(az role assignment list \
+    --assignee-object-id "$principal_id" \
+    --assignee-principal-type ServicePrincipal \
+    --scope "$storage_account_id" \
+    --query "[?roleDefinitionName=='${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE}'] | length(@)" -o tsv 2>/dev/null || echo "0")
+
+  if [[ "${existing_count:-0}" -ge 1 ]]; then
+    ok "ACI '${aci_name}' already has '${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE}'"
+    return 0
+  fi
+
+  local attempt
+  for attempt in $(seq 1 12); do
+    if az role assignment create \
+      --assignee-object-id "$principal_id" \
+      --assignee-principal-type ServicePrincipal \
+      --role "$STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE" \
+      --scope "$storage_account_id" \
+      --output none &>/dev/null; then
+      ok "Granted '${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE}' to ACI '${aci_name}'"
+      return 0
+    fi
+
+    if [[ "$attempt" -lt 12 ]]; then
+      warn "Waiting for managed identity '${aci_name}' to become assignable..."
+      sleep 10
+    fi
+  done
+
+  err "Failed to assign '${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE}' to ACI '${aci_name}'"
+  return 1
+}
+
+wait_for_aci_instances_completion() {
+  local aci_names=("$@")
+
+  if $DRY_RUN || [[ "${#aci_names[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  log "Waiting for ACI instances to complete..."
+  local all_done=false
+  while ! $all_done; do
+    all_done=true
+    for aci_name in "${aci_names[@]}"; do
+      local state
+      state=$(az container show \
+        --name "$aci_name" \
+        --resource-group "$RESOURCE_GROUP" \
+        --query "instanceView.state" -o tsv 2>/dev/null || echo "Unknown")
+      if [[ "$state" != "Succeeded" && "$state" != "Failed" && "$state" != "Terminated" ]]; then
+        all_done=false
+      fi
+    done
+
+    if ! $all_done; then
+      echo -n "."
+      sleep 15
+    fi
+  done
+  echo ""
+}
+
+get_max_aci_index() {
+  if $DRY_RUN; then
+    echo "0"
+    return 0
+  fi
+
+  local max_idx=0
+  local aci_names
+  aci_names=$(az container list \
+    --resource-group "$RESOURCE_GROUP" \
+    --query "[?starts_with(name, '${ACI_PREFIX}-')].name" -o tsv 2>/dev/null || true)
+
+  while IFS= read -r aci_name; do
+    [[ -z "$aci_name" ]] && continue
+    local suffix="${aci_name#${ACI_PREFIX}-}"
+    if [[ "$suffix" =~ ^[0-9]+$ ]]; then
+      local numeric_suffix=$((10#$suffix))
+      if (( numeric_suffix > max_idx )); then
+        max_idx=$numeric_suffix
+      fi
+    fi
+  done <<< "$aci_names"
+
+  echo "$max_idx"
+}
+
+initialize_azdatamaker_infra() {
+  log "Setting up Azure Container Registry '${ACR_NAME}'..."
+
+  if ! $DRY_RUN && az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+    ok "ACR '${ACR_NAME}' already exists — reusing"
+  else
+    run_or_dry "az acr create \
+      --name '${ACR_NAME}' \
+      --resource-group '${RESOURCE_GROUP}' \
+      --admin-enabled true \
+      --sku Standard \
+      --location '${SOURCE_REGION}' \
+      --output none"
+    ok "ACR '${ACR_NAME}' created"
+  fi
+
+  run_or_dry "az acr update \
+    --name '${ACR_NAME}' \
+    --resource-group '${RESOURCE_GROUP}' \
+    --admin-enabled true \
+    --output none"
+
+  log "Building AzDataMaker container image from Azure/AzDataMaker..."
+  run_or_dry "az acr build \
+    --resource-group '${RESOURCE_GROUP}' \
+    --registry '${ACR_NAME}' \
+    '${AZDATAMAKER_GIT_URL}' \
+    -f '${AZDATAMAKER_DOCKERFILE}' \
+    --image '${AZDATAMAKER_IMAGE}' \
+    --no-logs \
+    --output none"
+  ok "AzDataMaker image ready"
+
+  if $DRY_RUN; then
+    ACR_SERVER="${ACR_NAME}.azurecr.io"
+    ACR_USER="<dry-run>"
+    ACR_PWD="<dry-run>"
+    SOURCE_STORAGE_ID="/subscriptions/<subscription>/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Storage/storageAccounts/${SOURCE_STORAGE}"
+    SOURCE_STORAGE_URI="https://${SOURCE_STORAGE}.blob.core.windows.net/"
+    return 0
+  fi
+
+  ACR_SERVER=$(az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query loginServer -o tsv)
+  ACR_USER=$(az acr credential show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query username -o tsv)
+  ACR_PWD=$(az acr credential show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" --query "passwords[0].value" -o tsv)
+  SOURCE_STORAGE_ID=$(az storage account show --name "$SOURCE_STORAGE" --resource-group "$RESOURCE_GROUP" --query "id" -o tsv)
+  SOURCE_STORAGE_URI=$(az storage account show --name "$SOURCE_STORAGE" --resource-group "$RESOURCE_GROUP" --query "primaryEndpoints.blob" -o tsv)
+  return 0
+}
+
+deploy_azdatamaker_instance() {
+  local aci_name="$1"
+  local container_names="$2"
+  local report_status_increment="$3"
+  local reuse_compatible="${4:-false}"
+
+  if ! $DRY_RUN && az container show --name "$aci_name" --resource-group "$RESOURCE_GROUP" &>/dev/null; then
+    if [[ "$reuse_compatible" == "true" ]] && aci_uses_managed_identity_storage_uri "$aci_name"; then
+      ok "ACI '${aci_name}' already exists — reusing"
+      local existing_principal_id
+      existing_principal_id=$(az container show \
+        --name "$aci_name" \
+        --resource-group "$RESOURCE_GROUP" \
+        --query "identity.principalId" -o tsv 2>/dev/null || echo "")
+      if [[ -n "$existing_principal_id" ]]; then
+        ensure_storage_blob_data_contributor "$existing_principal_id" "$SOURCE_STORAGE_ID" "$aci_name"
+      fi
+      return 0
+    fi
+
+    if [[ "$reuse_compatible" == "true" ]]; then
+      warn "ACI '${aci_name}' exists but does not use managed identity + StorageAccountUri — recreating"
+    else
+      warn "ACI '${aci_name}' already exists — recreating"
+    fi
+
+    az container delete \
+      --name "$aci_name" \
+      --resource-group "$RESOURCE_GROUP" \
+      --yes \
+      --output none
+    wait_for_aci_deleted "$aci_name"
+  fi
+
+  run_or_dry "az container create \
+    --name '${aci_name}' \
+    --resource-group '${RESOURCE_GROUP}' \
+    --location '${SOURCE_REGION}' \
+    --os-type Linux \
+    --cpu 1 \
+    --memory 1 \
+    --registry-login-server '${ACR_SERVER}' \
+    --registry-username '${ACR_USER}' \
+    --registry-password '${ACR_PWD}' \
+    --image '${ACR_SERVER}/${AZDATAMAKER_IMAGE}' \
+    --restart-policy Never \
+    --assign-identity \
+    --environment-variables \
+      FileCount='${FILES_PER_INSTANCE}' \
+      MaxFileSize='${MAX_FILE_SIZE}' \
+      MinFileSize='${MIN_FILE_SIZE}' \
+      ReportStatusIncrement='${report_status_increment}' \
+      BlobContainers='${container_names}' \
+      RandomFileContents='false' \
+      StorageAccountUri='${SOURCE_STORAGE_URI}' \
+    --output none"
+
+  if ! $DRY_RUN; then
+    local principal_id
+    principal_id=$(wait_for_aci_principal_id "$aci_name")
+    ensure_storage_blob_data_contributor "$principal_id" "$SOURCE_STORAGE_ID" "$aci_name"
+  fi
+
+  ok "ACI '${aci_name}' deployed"
+}
+
 # ── Print resolved configuration ─────────────────
 print_config() {
   log "Resolved configuration:"
@@ -183,7 +468,7 @@ print_config() {
   echo "  │ Containers:         ${CONTAINER_COUNT} (${SOURCE_CONTAINER_PREFIX}-NN → ${DEST_CONTAINER_PREFIX}-NN)"
   echo "  │ Replication mode:   ${REPLICATION_MODE}"
   echo "  │ Data size:          ${DATA_SIZE_GB} GB"
-  echo "  │ ACI count:          ${ACI_COUNT}"
+  echo "  │ ACI count:          ${ACI_COUNT} (AzDataMaker only)"
   echo "  │ ACR name:           ${ACR_NAME}"
   echo "  └─────────────────────────────────────────────────"
 }

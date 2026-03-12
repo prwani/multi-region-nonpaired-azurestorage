@@ -12,6 +12,10 @@ $script:DryRun        = $false
 $script:Yes           = $false
 $script:SkipBenchmark = $false
 $script:RepoRoot      = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$script:AzDataMakerGitUrl = 'https://github.com/Azure/AzDataMaker.git'
+$script:AzDataMakerDockerfile = 'src/AzDataMaker/AzDataMaker/Dockerfile'
+$script:AzDataMakerImage = 'azdatamaker:latest'
+$script:StorageBlobDataContributorRole = 'Storage Blob Data Contributor'
 
 # ── Logging ───────────────────────────────────────
 
@@ -66,7 +70,11 @@ function Invoke-OrDry {
         $text = if ($Description) { $Description } else { $Command.ToString().Trim() }
         Write-Dry "Would run: $text"
     } else {
+        $global:LASTEXITCODE = 0
         & $Command
+        if ($LASTEXITCODE -ne 0) {
+            throw "Command failed with exit code $LASTEXITCODE."
+        }
     }
 }
 
@@ -147,7 +155,7 @@ function Import-Config {
     $script:SourceContainerPrefix = Resolve-Var 'SOURCE_CONTAINER_PREFIX' 'source'
     $script:DestContainerPrefix   = Resolve-Var 'DEST_CONTAINER_PREFIX'   'dest'
     $script:ReplicationMode       = Resolve-Var 'REPLICATION_MODE'        'default'
-    $script:DataSizeGb            = [int](Resolve-Var 'DATA_SIZE_GB'      '1')
+    $script:DataSizeGb            = [double](Resolve-Var 'DATA_SIZE_GB'   '1')
     $script:AciCount              = [int](Resolve-Var 'ACI_COUNT'         '1')
     $script:MaxFileSize           = [int](Resolve-Var 'MAX_FILE_SIZE'     '12')
     $script:MinFileSize           = [int](Resolve-Var 'MIN_FILE_SIZE'     '8')
@@ -195,7 +203,7 @@ function Parse-CommonArgs {
             '--dest-storage'     { $script:DestStorage           = $Arguments[++$i] }
             '--container-count'  { $script:ContainerCount        = [int]$Arguments[++$i] }
             '--replication-mode' { $script:ReplicationMode       = $Arguments[++$i] }
-            '--data-size-gb'     { $script:DataSizeGb            = [int]$Arguments[++$i] }
+            '--data-size-gb'     { $script:DataSizeGb            = [double]$Arguments[++$i] }
             '--aci-count'        { $script:AciCount              = [int]$Arguments[++$i] }
             '--max-file-size'    { $script:MaxFileSize           = [int]$Arguments[++$i] }
             '--min-file-size'    { $script:MinFileSize           = [int]$Arguments[++$i] }
@@ -238,7 +246,7 @@ function Get-AzDataMakerParams {
     Write-Log 'Data generation plan:'
     Write-Ok  "Target size:       ~${estSize} GB"
     Write-Ok  "Files:             $($script:FileCount) ($($script:MinFileSize)–$($script:MaxFileSize) MiB each)"
-    Write-Ok  "ACI instances:     $($script:AciCount) ($filesPerInstance files each)"
+    Write-Ok  "ACI instances:     $($script:AciCount) ($filesPerInstance files each, AzDataMaker only)"
     Write-Ok  "Containers:        $($script:ContainerCount) (round-robin)"
 
     $script:FilesPerInstance = $filesPerInstance
@@ -275,6 +283,459 @@ function Get-ContainerNames {
     return ($names -join ',')
 }
 
+function Get-AciName {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Index)
+
+    return '{0}-{1:D2}' -f $script:AciPrefix, $Index
+}
+
+function New-RandomBenchmarkFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int]$SizeMiB
+    )
+
+    [byte[]]$buffer = New-Object byte[] (1MB)
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+        for ($chunk = 0; $chunk -lt $SizeMiB; $chunk++) {
+            [System.Security.Cryptography.RandomNumberGenerator]::Fill($buffer)
+            $stream.Write($buffer, 0, $buffer.Length)
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Invoke-LocalBlobUploadBenchmark {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$FileNamePrefix,
+        [Parameter(Mandatory)][string]$IntroMessage,
+        [int]$ProgressEvery = 10
+    )
+
+    $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+
+    try {
+        Write-Log $IntroMessage
+        $containers = (Get-ContainerNames -Prefix $script:SourceContainerPrefix).Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)
+        $containerIndex = 0
+
+        for ($i = 1; $i -le $script:FileCount; $i++) {
+            $sizeMiB = Get-Random -Minimum $script:MinFileSize -Maximum ($script:MaxFileSize + 1)
+            $fileName = '{0}-{1:D4}.bin' -f $FileNamePrefix, $i
+            $container = $containers[$containerIndex]
+            $containerIndex = ($containerIndex + 1) % $containers.Count
+            $filePath = Join-Path $tempDir $fileName
+
+            if (-not $script:DryRun) {
+                New-RandomBenchmarkFile -Path $filePath -SizeMiB $sizeMiB
+            }
+
+            Invoke-OrDry -Description "az storage blob upload --account-name '$($script:SourceStorage)' --container-name '$container' --name '$fileName'" -Command {
+                az storage blob upload `
+                    --account-name $script:SourceStorage `
+                    --container-name $container `
+                    --name $fileName `
+                    --file $filePath `
+                    --auth-mode login `
+                    --overwrite `
+                    --no-progress `
+                    --output none
+            }
+
+            if (-not $script:DryRun -and (Test-Path $filePath)) {
+                Remove-Item $filePath -Force
+            }
+
+            if ($i % $ProgressEvery -eq 0) {
+                Write-Ok "$i/$($script:FileCount) files uploaded"
+            }
+        }
+
+        Write-Ok "All $($script:FileCount) files uploaded"
+    }
+    finally {
+        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Initialize-AzDataMakerInfrastructure {
+    [CmdletBinding()]
+    param()
+
+    Write-Log "Setting up Azure Container Registry '$($script:AcrName)'..."
+
+    $acrExists = $false
+    if (-not $script:DryRun) {
+        $acrId = az acr show --name $script:AcrName --resource-group $script:ResourceGroup --query id -o tsv 2>$null
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($acrId)) {
+            $acrExists = $true
+        }
+    }
+
+    if ($acrExists) {
+        Write-Ok "ACR '$($script:AcrName)' already exists — reusing"
+    }
+    else {
+        Invoke-OrDry -Description "az acr create --name '$($script:AcrName)'" -Command {
+            az acr create `
+                --name $script:AcrName `
+                --resource-group $script:ResourceGroup `
+                --admin-enabled true `
+                --sku Standard `
+                --location $script:SourceRegion `
+                --output none
+        }
+        Write-Ok "ACR '$($script:AcrName)' created"
+    }
+
+    Invoke-OrDry -Description "az acr update --name '$($script:AcrName)' --admin-enabled true" -Command {
+        az acr update `
+            --name $script:AcrName `
+            --resource-group $script:ResourceGroup `
+            --admin-enabled true `
+            --output none
+    }
+
+    Write-Log 'Building AzDataMaker container image from Azure/AzDataMaker...'
+    Invoke-OrDry -Description "az acr build --registry '$($script:AcrName)' --image $($script:AzDataMakerImage)" -Command {
+        az acr build `
+            --resource-group $script:ResourceGroup `
+            --registry $script:AcrName `
+            $script:AzDataMakerGitUrl `
+            -f $script:AzDataMakerDockerfile `
+            --image $script:AzDataMakerImage `
+            --no-logs `
+            --output none
+    }
+    Write-Ok 'AzDataMaker image ready'
+
+    if ($script:DryRun) {
+        return @{
+            AcrServer         = "$($script:AcrName).azurecr.io"
+            AcrUser           = '<dry-run>'
+            AcrPassword       = '<dry-run>'
+            SourceStorageId   = "/subscriptions/<subscription>/resourceGroups/$($script:ResourceGroup)/providers/Microsoft.Storage/storageAccounts/$($script:SourceStorage)"
+            StorageAccountUri = "https://$($script:SourceStorage).blob.core.windows.net/"
+        }
+    }
+
+    $acrServer = az acr show --name $script:AcrName --resource-group $script:ResourceGroup --query loginServer -o tsv
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($acrServer)) {
+        throw "Failed to resolve login server for ACR '$($script:AcrName)'."
+    }
+
+    $acrUser = az acr credential show --name $script:AcrName --resource-group $script:ResourceGroup --query username -o tsv
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($acrUser)) {
+        throw "Failed to resolve username for ACR '$($script:AcrName)'."
+    }
+
+    $acrPassword = az acr credential show --name $script:AcrName --resource-group $script:ResourceGroup --query "passwords[0].value" -o tsv
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($acrPassword)) {
+        throw "Failed to resolve credentials for ACR '$($script:AcrName)'."
+    }
+
+    $sourceStorageId = az storage account show --name $script:SourceStorage --resource-group $script:ResourceGroup --query id -o tsv
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceStorageId)) {
+        throw "Failed to resolve resource ID for storage account '$($script:SourceStorage)'."
+    }
+
+    $storageAccountUri = az storage account show --name $script:SourceStorage --resource-group $script:ResourceGroup --query primaryEndpoints.blob -o tsv
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($storageAccountUri)) {
+        throw "Failed to resolve blob endpoint for storage account '$($script:SourceStorage)'."
+    }
+
+    return @{
+        AcrServer         = $acrServer
+        AcrUser           = $acrUser
+        AcrPassword       = $acrPassword
+        SourceStorageId   = $sourceStorageId
+        StorageAccountUri = $storageAccountUri
+    }
+}
+
+function Test-AzDataMakerContainerCompatibility {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$AciName)
+
+    try {
+        $principalId = az container show `
+            --name $AciName `
+            --resource-group $script:ResourceGroup `
+            --query identity.principalId -o tsv 2>$null
+        $storageAccountUri = az container show `
+            --name $AciName `
+            --resource-group $script:ResourceGroup `
+            --query "containers[0].environmentVariables[?name=='StorageAccountUri'].value | [0]" -o tsv 2>$null
+
+        return (-not [string]::IsNullOrWhiteSpace($principalId) -and -not [string]::IsNullOrWhiteSpace($storageAccountUri))
+    }
+    catch {
+        return $false
+    }
+}
+
+function Wait-AciPrincipalId {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$AciName,
+        [int]$MaxAttempts = 60,
+        [int]$DelaySeconds = 5
+    )
+
+    if ($script:DryRun) {
+        return '<dry-run-principal-id>'
+    }
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $principalId = az container show `
+            --name $AciName `
+            --resource-group $script:ResourceGroup `
+            --query identity.principalId -o tsv 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            $principalId = $null
+        }
+        if (-not [string]::IsNullOrWhiteSpace($principalId)) {
+            return $principalId
+        }
+
+        Start-Sleep -Seconds $DelaySeconds
+    }
+
+    throw "Managed identity principalId for ACI '$AciName' was not available in time."
+}
+
+function Wait-AciDeletion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$AciName,
+        [int]$MaxAttempts = 60,
+        [int]$DelaySeconds = 5
+    )
+
+    if ($script:DryRun) {
+        return
+    }
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            $existing = az container show `
+                --name $AciName `
+                --resource-group $script:ResourceGroup `
+                --query id -o tsv 2>$null
+        }
+        catch {
+            return
+        }
+
+        if ([string]::IsNullOrWhiteSpace($existing)) {
+            return
+        }
+
+        Start-Sleep -Seconds $DelaySeconds
+    }
+
+    throw "Timed out waiting for ACI '$AciName' to delete."
+}
+
+function Ensure-StorageBlobDataContributorRole {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PrincipalId,
+        [Parameter(Mandatory)][string]$Scope,
+        [Parameter(Mandatory)][string]$AciName
+    )
+
+    if ($script:DryRun) {
+        Write-Dry "Would assign '$($script:StorageBlobDataContributorRole)' to '$AciName' ($PrincipalId) on '$Scope'"
+        return
+    }
+
+    $existingAssignments = az role assignment list `
+        --assignee-object-id $PrincipalId `
+        --assignee-principal-type ServicePrincipal `
+        --scope $Scope `
+        --query "[?roleDefinitionName=='$($script:StorageBlobDataContributorRole)'] | length(@)" -o tsv 2>$null
+
+    if ([string]::IsNullOrWhiteSpace($existingAssignments)) {
+        $existingAssignments = '0'
+    }
+
+    if ([int]$existingAssignments -ge 1) {
+        Write-Ok "ACI '$AciName' already has '$($script:StorageBlobDataContributorRole)'"
+        return
+    }
+
+    for ($attempt = 1; $attempt -le 12; $attempt++) {
+        az role assignment create `
+            --assignee-object-id $PrincipalId `
+            --assignee-principal-type ServicePrincipal `
+            --role $script:StorageBlobDataContributorRole `
+            --scope $Scope `
+            --output none 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "Granted '$($script:StorageBlobDataContributorRole)' to ACI '$AciName'"
+            return
+        }
+
+        if ($attempt -eq 12) {
+            throw "Failed to assign '$($script:StorageBlobDataContributorRole)' to ACI '$AciName'."
+        }
+
+        Write-Warn "Waiting for managed identity '$AciName' to become assignable..."
+        Start-Sleep -Seconds 10
+    }
+}
+
+function Deploy-AzDataMakerInstance {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$AciName,
+        [Parameter(Mandatory)][hashtable]$Infrastructure,
+        [Parameter(Mandatory)][string]$BlobContainers,
+        [int]$ReportStatusIncrement = 100,
+        [switch]$ReuseCompatible
+    )
+
+    if (-not $script:DryRun) {
+        $existingAci = az container show `
+            --name $AciName `
+            --resource-group $script:ResourceGroup `
+            --query id -o tsv 2>$null
+
+        if (-not [string]::IsNullOrWhiteSpace($existingAci)) {
+            if ($ReuseCompatible -and (Test-AzDataMakerContainerCompatibility -AciName $AciName)) {
+                Write-Ok "ACI '$AciName' already exists — reusing"
+                $principalId = az container show `
+                    --name $AciName `
+                    --resource-group $script:ResourceGroup `
+                    --query identity.principalId -o tsv 2>$null
+                if (-not [string]::IsNullOrWhiteSpace($principalId)) {
+                    Ensure-StorageBlobDataContributorRole -PrincipalId $principalId -Scope $Infrastructure.SourceStorageId -AciName $AciName
+                }
+                return
+            }
+
+            if ($ReuseCompatible) {
+                Write-Warn "ACI '$AciName' exists but does not use managed identity + StorageAccountUri — recreating"
+            }
+            else {
+                Write-Warn "ACI '$AciName' already exists — recreating"
+            }
+
+            az container delete `
+                --name $AciName `
+                --resource-group $script:ResourceGroup `
+                --yes `
+                --output none
+            Wait-AciDeletion -AciName $AciName
+        }
+    }
+
+    Invoke-OrDry -Description "az container create --name '$AciName'" -Command {
+        az container create `
+            --name $AciName `
+            --resource-group $script:ResourceGroup `
+            --location $script:SourceRegion `
+            --os-type Linux `
+            --cpu 1 `
+            --memory 1 `
+            --registry-login-server $Infrastructure.AcrServer `
+            --registry-username $Infrastructure.AcrUser `
+            --registry-password $Infrastructure.AcrPassword `
+            --image "$($Infrastructure.AcrServer)/$($script:AzDataMakerImage)" `
+            --restart-policy Never `
+            --assign-identity `
+            --environment-variables `
+                FileCount="$($script:FilesPerInstance)" `
+                MaxFileSize="$($script:MaxFileSize)" `
+                MinFileSize="$($script:MinFileSize)" `
+                ReportStatusIncrement="$ReportStatusIncrement" `
+                BlobContainers="$BlobContainers" `
+                RandomFileContents='false' `
+                StorageAccountUri="$($Infrastructure.StorageAccountUri)" `
+            --output none
+    }
+
+    if (-not $script:DryRun) {
+        $principalId = Wait-AciPrincipalId -AciName $AciName
+        Ensure-StorageBlobDataContributorRole -PrincipalId $principalId -Scope $Infrastructure.SourceStorageId -AciName $AciName
+    }
+
+    Write-Ok "ACI '$AciName' deployed"
+}
+
+function Wait-AciInstancesCompletion {
+    [CmdletBinding()]
+    param([string[]]$AciNames)
+
+    if ($script:DryRun -or -not $AciNames -or $AciNames.Count -eq 0) {
+        return
+    }
+
+    Write-Log 'Waiting for ACI instances to complete...'
+    $allDone = $false
+    while (-not $allDone) {
+        $allDone = $true
+        foreach ($aciName in $AciNames) {
+            $state = az container show `
+                --name $aciName `
+                --resource-group $script:ResourceGroup `
+                --query instanceView.state -o tsv 2>$null
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($state)) {
+                $state = 'Unknown'
+            }
+
+            if ($state -notin 'Succeeded', 'Failed', 'Terminated') {
+                $allDone = $false
+            }
+        }
+
+        if (-not $allDone) {
+            Write-Host -NoNewline '.'
+            Start-Sleep -Seconds 15
+        }
+    }
+
+    Write-Host ''
+}
+
+function Get-MaxAciIndex {
+    [CmdletBinding()]
+    param()
+
+    if ($script:DryRun) {
+        return 0
+    }
+
+    try {
+        $aciNames = az container list `
+            --resource-group $script:ResourceGroup `
+            --query "[?starts_with(name, '$($script:AciPrefix)-')].name" -o tsv 2>$null
+    }
+    catch {
+        return 0
+    }
+
+    $maxIndex = 0
+    foreach ($aciName in ($aciNames -split "`r?`n")) {
+        if ($aciName -match "^$([regex]::Escape($script:AciPrefix))-(\d+)$") {
+            $candidate = [int]$Matches[1]
+            if ($candidate -gt $maxIndex) {
+                $maxIndex = $candidate
+            }
+        }
+    }
+
+    return $maxIndex
+}
+
 # ── Print resolved configuration ─────────────────
 
 function Write-Config {
@@ -298,7 +759,7 @@ function Write-Config {
     Write-Host "  │ Containers:         $($script:ContainerCount) ($($script:SourceContainerPrefix)-NN → $($script:DestContainerPrefix)-NN)"
     Write-Host "  │ Replication mode:   $($script:ReplicationMode)"
     Write-Host "  │ Data size:          $($script:DataSizeGb) GB"
-    Write-Host "  │ ACI count:          $($script:AciCount)"
+    Write-Host "  │ ACI count:          $($script:AciCount) (AzDataMaker only)"
     Write-Host "  │ ACR name:           $($script:AcrName)"
     Write-Host "  └─────────────────────────────────────────────────"
 }

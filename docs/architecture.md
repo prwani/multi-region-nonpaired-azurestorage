@@ -2,116 +2,125 @@
 
 ## Overview
 
-This project sets up **Azure Blob Storage Object Replication** between two non-paired Azure regions to demonstrate cross-region data replication without relying on GRS paired-region constraints.
+This repo demonstrates **Azure Blob Storage Object Replication** between non-paired regions and now documents **two complementary tracks**:
 
-## Component Diagram
+- a **CLI-first main track** for learning, benchmarking, and feature validation
+- an **AVM companion track** for production-oriented storage provisioning with a separate replication-activation step
 
+## Deployment tracks at a glance
+
+| Track | Provisioning model | Benchmarking model | Best fit |
+|---|---|---|---|
+| **CLI-first main track** | Bash or PowerShell scripts in `scripts/` | Default: local file generation + `az storage blob upload --auth-mode login`<br>Optional: AzDataMaker via ACR/ACI + managed identity | Feature demos, reproducible tests, quick setup |
+| **AVM companion track** | `infra/avm/main.bicep` with `.bicepparam` files | No benchmark resources provisioned by default | Production-oriented foundation, secure defaults, change control |
+
+## Naming and topology
+
+- CLI storage account names come from `SOURCE_STORAGE` and `DEST_STORAGE` in [`config.env`](../config.env).
+- If those values are blank, the CLI scripts derive stable names from the resource group hash, for example `objreplsrc736208` and `objrepldst736208`.
+- Default container naming stays prefix-based: `source-01`, `source-02`, ... and `dest-01`, `dest-02`, ...
+- The AVM companion is explicit instead of generated: `infra/avm/main.bicep` requires `sourceStorageAccountName` and `destinationStorageAccountName` parameters.
+
+## Component diagram
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│ CLI-first main track                                                                   │
+│                                                                                         │
+│  Local workstation / terminal                                                           │
+│  (az login, Bash or PowerShell)                                                         │
+│            │                                                                            │
+│            │ default benchmark path                                                     │
+│            ▼                                                                            │
+│  az storage blob upload --auth-mode login                                               │
+│            │                                                                            │
+│            ▼                                                                            │
+│  Source storage account (change feed + versioning)                                      │
+│            │                                                                            │
+│            │ object replication policy (default or priority)                            │
+│            ▼                                                                            │
+│  Destination storage account (versioning, destination containers become read-only)      │
+│                                                                                         │
+│  Optional benchmark path                                                                │
+│  ACR build from Azure/AzDataMaker -> ACI with system-assigned managed identity         │
+│  -> StorageAccountUri -> writes to source containers                                    │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│ AVM companion track                                                                     │
+│                                                                                         │
+│  az deployment group create -> infra/avm/main.bicep                                     │
+│        provisions storage accounts, containers, monitoring, optional CMK/private EPs    │
+│                                                                                         │
+│  infra/avm/create-object-replication.sh                                                 │
+│        reads deployment outputs and activates the replication policy                    │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                                                                             │
-│  ┌─── Sweden Central (Source Region) ────────────────────────────────────────────────────┐   │
-│  │                                                                                       │   │
-│  │  ┌──────────────────────────────────────────────────────────────────────┐              │   │
-│  │  │  Source Storage Account                                             │              │   │
-│  │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐       │              │   │
-│  │  │  │ source-01  │ │ source-02  │ │ source-03  │ │ source-NN  │ ...   │              │   │
-│  │  │  └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘       │              │   │
-│  │  │        │              │              │              │               │              │   │
-│  │  │  ✔ Change feed enabled                                              │              │   │
-│  │  │  ✔ Blob versioning enabled                                          │              │   │
-│  │  └──────────────────────────┬───────────────────────────────────────────┘              │   │
-│  │                             │                                                         │   │
-│  │  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐                │   │
-│  │    Benchmarking Only        │                                                         │   │
-│  │  │                          ▲                                        │                │   │
-│  │   ┌──────────────┐   Upload blobs                                                    │   │
-│  │  ││ ACR          │──────────┘                                        │                │   │
-│  │   │ (AzDataMaker │                                                                   │   │
-│  │  ││  image)      │                                                   │                │   │
-│  │   └──────┬───────┘                                                                   │   │
-│  │  │       │ Pull image                                                │                │   │
-│  │          ▼                                                                            │   │
-│  │  │ ┌──────────────┐                                                  │                │   │
-│  │   │ ACI           │   AzDataMaker instances                                          │   │
-│  │  ││ (1..N)        │   generate test data                             │                │   │
-│  │   └──────────────┘                                                                   │   │
-│  │  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘                │   │
-│  └───────────────────────────────────────────────────────────────────────────────────────┘   │
-│                                            │                                                 │
-│                                            │ Object Replication Policy                       │
-│                                            │ (default or priority mode)                      │
-│                                            │ Async cross-region replication                   │
-│                                            ▼                                                 │
-│  ┌─── Norway East (Destination Region) ──────────────────────────────────────────────────┐   │
-│  │                                                                                       │   │
-│  │  ┌──────────────────────────────────────────────────────────────────────┐              │   │
-│  │  │  Destination Storage Account                                        │              │   │
-│  │  │  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐       │              │   │
-│  │  │  │  dest-01   │ │  dest-02   │ │  dest-03   │ │  dest-NN   │ ...   │              │   │
-│  │  │  └────────────┘ └────────────┘ └────────────┘ └────────────┘       │              │   │
-│  │  │                                                                     │              │   │
-│  │  │  ✔ Blob versioning enabled                                          │              │   │
-│  │  └─────────────────────────────────────────────────────────────────────┘              │   │
-│  └───────────────────────────────────────────────────────────────────────────────────────┘   │
-│                                                                                             │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
-```
 
-## Data Flow
+## Data flows
 
-### Production flow (solid components)
+### 1) CLI-first default flow
 
-1. **Source Storage Account** in Sweden Central receives blob writes from applications
-2. **Change feed** captures all write/delete operations on the source account
-3. **Object Replication** reads the change feed and asynchronously replicates block blobs to the destination
-4. **Destination Storage Account** in Norway East receives replicated blobs with metadata and properties intact
-5. Each source container is paired with a destination container via a replication rule
+1. `01-create-storage.*` creates the resource group and the two storage accounts.
+2. `02-enable-prereqs.*` enables **change feed** on the source and **blob versioning** on both accounts, then creates the source containers.
+3. `bench-01-ingest-data.*` and `bench-02-continue-ingestion.*` generate files locally and upload them with `az storage blob upload --auth-mode login` unless you opt into AzDataMaker.
+4. `03-setup-replication.*` creates destination containers, creates the first rule on the destination account, adds remaining rules, then creates the matching source-side policy.
+5. `bench-03-monitor-replication.*` samples blob `replicationStatus` and reads Azure Monitor metrics.
 
-### Benchmarking flow (dashed components)
+Both Bash and PowerShell implement the same replication behavior, including:
 
-1. **ACR** hosts the AzDataMaker container image (built from [Azure/azdatamaker](https://github.com/Azure/azdatamaker))
-2. **ACI** instances pull the image and generate test data files
-3. Files are uploaded to source containers in a round-robin pattern
-4. This simulates real-world blob ingestion for performance measurement
+- the same **copy-all** scope via `--min-creation-time '1601-01-01T00:00:00Z'`
+- the same **destination-first** policy creation pattern
+- the same **copy every configured container pair** flow
 
-## Replication Modes
+### 2) Optional AzDataMaker benchmark flow
 
-| Mode | Description | SLA |
-|------|-------------|-----|
-| **Default** | Standard async replication, no guaranteed timeline | None |
-| **Priority** | Prioritized replication with enhanced metrics | 99% within 15 min (same continent) |
+When you pass `--use-azdatamaker` in Bash or `-UseAzDataMaker` / `--use-azdatamaker` in PowerShell:
 
-## Prerequisites per Account
+1. the repo builds the container image from [`https://github.com/Azure/AzDataMaker.git`](https://github.com/Azure/AzDataMaker.git)
+2. the image is stored in Azure Container Registry
+3. Azure Container Instances are created with a **system-assigned managed identity**
+4. each container receives `StorageAccountUri`
+5. the ACI identity is granted **Storage Blob Data Contributor** on the **source storage account**
+6. the ACI workload writes directly to the source containers
 
-| Feature | Source Account | Destination Account |
-|---------|---------------|-------------------- |
-| Change feed | ✔ Required | Not needed |
-| Blob versioning | ✔ Required | ✔ Required |
-| StorageV2 or Premium Block Blob | ✔ Required | ✔ Required |
-| Hierarchical namespace | ✖ Not supported | ✖ Not supported |
+This is an optional scale-out benchmark path. It is **not** the default path anymore.
 
-## Key Constraints
+### 3) AVM companion flow
 
-- Only **block blobs** are replicated (not append or page blobs)
-- Destination containers become **read-only** while the replication policy is active
-- A source account can replicate to at most **2 destination accounts**
-- Priority replication can only be enabled on **1 policy per source account**
-- Cross-tenant replication requires full resource IDs and `AllowCrossTenantReplication = true`
+1. `infra/avm/main.bicep` provisions the storage foundation with AVM, source/destination containers, optional monitoring, optional CMK, and optional private endpoints.
+2. `infra/avm/create-object-replication.sh` reads the deployment outputs and activates the object replication policy.
+3. `Blog2.md` explains the design trade-offs, and `infra/avm/README.md` provides deployment instructions.
 
-## Cross-Platform Support
+The separation between provisioning and activation is intentional. It gives operators a clear review point before the destination side becomes read-only.
 
-All scripts are available in both **Bash** (`.sh`) and **PowerShell** (`.ps1`):
+## Security model
 
-| Script | Bash | PowerShell |
-|--------|------|-----------|
-| Shared utilities | `common.sh` | `common.ps1` |
-| Create storage | `01-create-storage.sh` | `01-create-storage.ps1` |
-| Enable prerequisites | `02-enable-prereqs.sh` | `02-enable-prereqs.ps1` |
-| Setup replication | `03-setup-replication.sh` | `03-setup-replication.ps1` |
-| Ingest data (bench) | `bench-01-ingest-data.sh` | `bench-01-ingest-data.ps1` |
-| Continue ingestion (bench) | `bench-02-continue-ingestion.sh` | `bench-02-continue-ingestion.ps1` |
-| Monitor replication (bench) | `bench-03-monitor-replication.sh` | `bench-03-monitor-replication.ps1` |
-| Run all | `setup-all.sh` | `setup-all.ps1` |
-| Cleanup | `cleanup.sh` | `cleanup.ps1` |
+- The CLI-first track expects an authenticated Azure CLI session and uses **login-based** data-plane access for local uploads and blob inspection.
+- The operator typically needs both management-plane rights (for deployment and policy configuration) and data-plane blob rights (for container creation, uploads, and inspection).
+- The optional AzDataMaker path uses **managed identity**, not shared key, for storage access.
+- The AVM companion defaults to `allowSharedKeyAccess=false`, disables blob public access, enforces HTTPS and TLS 1.2, and supports optional CMK and private endpoints.
 
-Both versions use the same `config.env` file and support equivalent CLI parameters.
+## Operations model
+
+Monitor at least these signals:
+
+- `ObjectReplicationSourceBytesReplicated`
+- `ObjectReplicationSourceOperationsReplicated`
+- priority-mode pending metrics (`Operations pending for replication`, `Bytes pending for replication`)
+- sampled blob `replicationStatus`
+- blob service logs and storage metrics where available
+
+Important operational caveats:
+
+- destination containers become **read-only** while replication is active
+- object replication is **async**, not a full application failover workflow
+- cutover, failback, endpoint switching, DNS, and application permissions remain part of your broader DR design
+
+## Platform constraints
+
+- Only **block blobs** are replicated.
+- Hierarchical namespace is **not supported** for object replication in this pattern.
+- A source account can replicate to at most **two** destination accounts.
+- Priority replication can be enabled on only **one policy per source account**.
+- Cross-tenant replication requires explicit resource IDs and the corresponding cross-tenant settings.

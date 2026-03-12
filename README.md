@@ -1,190 +1,162 @@
 # Multi-Region Non-Paired Azure Storage — Object Replication Demo
 
-> Demonstrates **Azure Blob Storage Object Replication** between non-paired regions (Sweden Central → Norway East) with configurable data generation and performance benchmarking.
+> Demonstrates Azure Blob Storage Object Replication between non-paired regions, with a **CLI-first demo track** for learning and benchmarking plus an **AVM/Bicep companion track** for production-oriented provisioning.
 
-## Why This Repo?
+## Overview
 
-Azure's built-in **GRS (Geo-Redundant Storage)** only replicates to a fixed paired region. **Object Replication** lets you replicate block blobs to **any** region — giving you control over data residency, latency optimization, and cost management.
+- The **main repo remains CLI-first**: Bash and PowerShell scripts walk through storage creation, prerequisite configuration, replication setup, benchmarking, and cleanup.
+- **Benchmarking now defaults to local file generation plus `az storage blob upload --auth-mode login`** in both Bash and PowerShell.
+- The **optional AzDataMaker benchmarking path** is available as `--use-azdatamaker` (Bash) and `-UseAzDataMaker` or `--use-azdatamaker` (PowerShell).
+- The **AVM companion track** lives under [`infra/avm/`](infra/avm/) with supporting narrative in [`Blog2.md`](Blog2.md).
+- Bash and PowerShell now have **replication parity**: both create the first rule on the destination account, add remaining container pairs, and then create the matching source-side policy.
 
-This repo provides:
-- **Production-ready scripts** to set up object replication between any two Azure regions
-- **Benchmarking tools** (using [AzDataMaker](https://github.com/Azure/azdatamaker)) to measure replication performance
-- **A publishable blog post** (`Blog.md`) with full walkthrough
+## Choose your track
 
-## Architecture
+| Track | Use it when | Start here | Activation model |
+|---|---|---|---|
+| **CLI-first demo** | You want the fastest learning path, a reproducible benchmark, or a simple end-to-end feature walkthrough | This README, [`Blog.md`](Blog.md), [`docs/architecture.md`](docs/architecture.md) | Scripts provision the accounts and activate replication |
+| **AVM companion** | You want an AVM/Bicep foundation, secure defaults, optional monitoring/CMK/private endpoints, and clearer change control before enabling replication | [`infra/avm/README.md`](infra/avm/README.md), [`Blog2.md`](Blog2.md) | `main.bicep` provisions the foundation; `infra/avm/create-object-replication.sh` activates replication |
 
-```
-┌─────────────────────────────┐         Object Replication         ┌─────────────────────────────┐
-│   Sweden Central (Source)   │  ─────────────────────────────────▶ │   Norway East (Destination) │
-│                             │    default or priority mode         │                             │
-│  ┌─────────────────────┐    │                                    │  ┌─────────────────────┐    │
-│  │ source-01           │────│────────────────────────────────────▶│──│ dest-01             │    │
-│  │ source-02           │────│────────────────────────────────────▶│──│ dest-02             │    │
-│  │ source-03           │────│────────────────────────────────────▶│──│ dest-03             │    │
-│  │ source-04           │────│────────────────────────────────────▶│──│ dest-04             │    │
-│  │ source-05           │────│────────────────────────────────────▶│──│ dest-05             │    │
-│  └─────────────────────┘    │                                    │  └─────────────────────┘    │
-│                             │                                    │                             │
-│  ✔ Change feed enabled      │                                    │  ✔ Blob versioning enabled  │
-│  ✔ Blob versioning enabled  │                                    │                             │
-└─────────────────────────────┘                                    └─────────────────────────────┘
-         ▲
-         │ (benchmarking only)
-    ┌────┴────┐
-    │  ACI    │  AzDataMaker
-    │ (ACI)   │  instances
-    └────┬────┘
-         │
-    ┌────┴────┐
-    │  ACR    │  Container
-    │         │  Registry
-    └─────────┘
-```
+## Track 1: CLI-first quick start
 
-## Prerequisites
+All core settings live in [`config.env`](config.env). You can keep the defaults, edit the file, or override values with CLI flags.
 
-- **Azure subscription** with Contributor access
-- **Azure CLI** installed and logged in (`az login`)
-- **PowerShell 7.0+** *or* **Bash 4+** — all scripts ship in both `.sh` and `.ps1` variants
-- **jq** / **bc** (Bash only — PowerShell scripts use built-in JSON and math)
+### One-command path
 
-> Scripts work on **Windows, macOS, and Linux**. Use whichever shell you prefer.
+**Bash**
 
-## Quick Start
-
-### Option A: 1-command setup (core + benchmarking)
-
-**Bash:**
 ```bash
 ./scripts/setup-all.sh
 ```
 
-**PowerShell:**
+**PowerShell**
+
 ```powershell
 ./scripts/setup-all.ps1
 ```
 
-### Option B: Core setup only (production-like, no benchmarking)
+### Core setup only (no benchmarking)
 
-**Bash:**
+**Bash**
+
 ```bash
 ./scripts/setup-all.sh --skip-benchmark
 ```
 
-**PowerShell:**
+**PowerShell**
+
 ```powershell
 ./scripts/setup-all.ps1 -SkipBenchmark
 ```
 
-### Option C: Step-by-step
+### Step-by-step flow
 
 | Step | Bash | PowerShell |
-|------|------|------------|
-| 1. Create resource group + storage | `./scripts/01-create-storage.sh` | `./scripts/01-create-storage.ps1` |
-| 2. Enable change feed, versioning, containers | `./scripts/02-enable-prereqs.sh` | `./scripts/02-enable-prereqs.ps1` |
-| 3. *(Bench)* Ingest test data before replication | `./scripts/bench-01-ingest-data.sh` | `./scripts/bench-01-ingest-data.ps1` |
-| 4. Set up object replication policy | `./scripts/03-setup-replication.sh` | `./scripts/03-setup-replication.ps1` |
+|---|---|---|
+| Create resource group and storage accounts | `./scripts/01-create-storage.sh` | `./scripts/01-create-storage.ps1` |
+| Enable change feed, versioning, and source containers | `./scripts/02-enable-prereqs.sh` | `./scripts/02-enable-prereqs.ps1` |
+| *(Optional benchmark)* Seed data before replication | `./scripts/bench-01-ingest-data.sh` | `./scripts/bench-01-ingest-data.ps1` |
+| Activate object replication | `./scripts/03-setup-replication.sh` | `./scripts/03-setup-replication.ps1` |
+| *(Optional benchmark)* Continue ingestion after replication starts | `./scripts/bench-02-continue-ingestion.sh` | `./scripts/bench-02-continue-ingestion.ps1` |
+| *(Optional benchmark)* Monitor replication health and throughput | `./scripts/bench-03-monitor-replication.sh` | `./scripts/bench-03-monitor-replication.ps1` |
 
-> **⚠️ Copy Scope:** By default, object replication only copies **new blobs** — pre-existing data is skipped. Our scripts set `--min-creation-time '1601-01-01T00:00:00Z'` to replicate all existing and future objects. If configuring manually, set the copy scope to "Copy all objects".
-| 5. *(Bench)* Continue ingestion | `./scripts/bench-02-continue-ingestion.sh` | `./scripts/bench-02-continue-ingestion.ps1` |
-| 6. *(Bench)* Monitor replication metrics | `./scripts/bench-03-monitor-replication.sh` | `./scripts/bench-03-monitor-replication.ps1` |
+### Naming behavior to expect
 
-## Configuration
+- Storage account names come from `SOURCE_STORAGE` and `DEST_STORAGE` in `config.env`.
+- If those values are blank, the CLI scripts derive stable names from the resource group hash, for example `objreplsrc736208` and `objrepldst736208`.
+- Container pairs default to `source-01` → `dest-01`, `source-02` → `dest-02`, and so on.
+- The AVM companion is different: its `.bicepparam` files require **explicit storage account names**.
 
-All settings live in **one file**: [`config.env`](config.env). Override via CLI flags on any script.
+## Track 2: AVM companion quick start
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `SOURCE_REGION` | `swedencentral` | Source storage account region |
-| `DEST_REGION` | `norwayeast` | Destination region (non-paired) |
-| `RESOURCE_GROUP` | `rg-objrepl-demo` | Resource group name |
-| `CONTAINER_COUNT` | `5` | Number of blob containers |
-| `REPLICATION_MODE` | `default` | `default` or `priority` |
-| `DATA_SIZE_GB` | `1` | Total test data volume (benchmarking) |
-| `ACI_COUNT` | `1` | ACI instances for data generation |
+The companion track is for teams that want AVM/Bicep to provision the storage foundation, then a separate activation step to turn on object replication.
 
-**CLI override examples:**
+1. Review and update [`infra/avm/main.bicepparam`](infra/avm/main.bicepparam) or [`infra/avm/advanced.bicepparam`](infra/avm/advanced.bicepparam). The storage account names must be globally unique.
+2. Deploy the Bicep foundation:
 
-**Bash:**
 ```bash
-./scripts/01-create-storage.sh --source-region westeurope --dest-region uksouth
-./scripts/bench-01-ingest-data.sh --data-size-gb 10 --aci-count 3
-./scripts/03-setup-replication.sh --replication-mode priority
+az group create --name rg-objrepl-companion --location swedencentral
+
+az deployment group create \
+  --resource-group rg-objrepl-companion \
+  --name avm-companion \
+  --template-file infra/avm/main.bicep \
+  --parameters infra/avm/main.bicepparam
 ```
 
-**PowerShell:**
-```powershell
-./scripts/01-create-storage.ps1 -SourceRegion westeurope -DestRegion uksouth
-./scripts/bench-01-ingest-data.ps1 -DataSizeGb 10 -AciCount 3
-./scripts/03-setup-replication.ps1 -ReplicationMode priority
-```
+3. Activate replication after the deployment completes:
 
-**Precedence:** CLI flags > environment variables > config.env > built-in defaults
-
-## Replication Modes
-
-| Mode | SLA | Extra Cost | Best For |
-|------|-----|-----------|----------|
-| **default** | None (async, best-effort) | No per-GB cost | Cost-sensitive workloads |
-| **priority** | 99% within 15 min (same continent) | Per-GB ingress cost | DR, business continuity |
-
-Switch modes:
 ```bash
-# In config.env
-REPLICATION_MODE="priority"
-
-# Or via CLI (Bash / PowerShell)
-./scripts/03-setup-replication.sh  --replication-mode priority
-./scripts/03-setup-replication.ps1 -ReplicationMode priority
+./infra/avm/create-object-replication.sh \
+  --resource-group rg-objrepl-companion \
+  --deployment-name avm-companion
 ```
 
-## Cleanup
+For the production-oriented walkthrough and trade-offs, see [`Blog2.md`](Blog2.md). For full deployment instructions, advanced parameter guidance, and post-deploy activation details, see [`infra/avm/README.md`](infra/avm/README.md).
 
-**Bash:**
-```bash
-./scripts/cleanup.sh              # Interactive confirmation
-./scripts/cleanup.sh --yes        # Skip confirmation
-./scripts/cleanup.sh --dry-run    # Preview
-```
+## Benchmarking modes
 
-**PowerShell:**
-```powershell
-./scripts/cleanup.ps1             # Interactive confirmation
-./scripts/cleanup.ps1 -Yes        # Skip confirmation
-./scripts/cleanup.ps1 -DryRun     # Preview
-```
+| Mode | How it works today | Best for |
+|---|---|---|
+| **Default local path** | Both Bash and PowerShell generate files locally and upload them with `az storage blob upload --auth-mode login` | Quick functional tests, smaller benchmarks, and environments where you want the simplest path and no ACR/ACI cost |
+| **Optional AzDataMaker path** | Bash: `--use-azdatamaker`<br>PowerShell: `-UseAzDataMaker` or `--use-azdatamaker` | Larger or parallelized test-data generation |
 
-## Repo Structure
+The optional AzDataMaker path currently:
 
-```
-scripts/
-  setup-all.{sh,ps1}                # Full setup (core + optional benchmarking)
-  01-create-storage.{sh,ps1}        # Resource group + storage accounts
-  02-enable-prereqs.{sh,ps1}        # Change feed, versioning, containers
-  03-setup-replication.{sh,ps1}     # Object replication policy
-  bench-01-ingest-data.{sh,ps1}     # Generate test blobs via ACI
-  bench-02-continue-ingestion.{sh,ps1}
-  bench-03-monitor-replication.{sh,ps1}
-  cleanup.{sh,ps1}                  # Tear down all resources
-config.env                          # Shared configuration (both shells)
-Blog.md                             # Publishable walkthrough
-```
+- builds from [`https://github.com/Azure/AzDataMaker.git`](https://github.com/Azure/AzDataMaker.git)
+- pushes the image to Azure Container Registry
+- runs Azure Container Instances with a **system-assigned managed identity**
+- passes `StorageAccountUri` to the container
+- assigns **Storage Blob Data Contributor** on the **source storage account** to that managed identity
 
-## Blog Post
+Shared key authentication is **no longer the main story** in this repo. The default benchmark path uses your interactive Azure login, and the optional AzDataMaker path uses managed identity.
 
-See [`Blog.md`](Blog.md) for a complete, publishable walkthrough covering:
-- Why object replication over GRS
-- Step-by-step setup guide
-- Performance benchmarking methodology
-- Cost considerations
+## Security guidance
+
+- Run the repo with an authenticated Azure identity (`az login`). The local benchmark path, container creation, and blob inspection all use **login-based** data-plane access.
+- The interactive user should have management-plane rights to create or update the resource group, storage accounts, ACR/ACI resources, and replication policy. **Contributor or equivalent** is the simplest documented setup.
+- Because the scripts use Azure AD for data-plane operations, the same user should also have a blob data role on the source and destination accounts or their containers. **Storage Blob Data Contributor** on both accounts is the easiest baseline; equivalent narrower roles are fine if they still allow container creation, upload, list, and blob inspection.
+- The optional AzDataMaker path uses a **system-assigned managed identity** on each ACI instance plus a **Storage Blob Data Contributor** assignment on the source account. That is the benchmark automation identity; it is separate from the interactive user.
+- For production-oriented deployments, prefer the AVM companion. It defaults to `allowSharedKeyAccess=false`, disables blob public access, enforces HTTPS and minimum TLS 1.2, and supports optional monitoring, CMK, and private endpoints.
+
+## Operations guidance
+
+### Metrics and signals to monitor
+
+| Signal | Why it matters |
+|---|---|
+| `ObjectReplicationSourceBytesReplicated` | Confirms bytes are actually flowing from source to destination |
+| `ObjectReplicationSourceOperationsReplicated` | Shows replicated write activity and helps validate throughput |
+| Priority-only pending metrics (`Operations pending for replication`, `Bytes pending for replication`) | Shows backlog by time bucket and helps detect SLA risk in priority mode |
+| Blob `replicationStatus` samples | Useful spot-check for `complete`, `pending`, or `failed` blobs |
+| Blob service logs and storage metrics | Helpful for troubleshooting access, network, or policy issues, especially in the AVM companion path |
+
+### Operational caveats
+
+- Destination containers become **read-only once object replication is active**. Complete any seeding, review, or approval steps before enabling the policy.
+- The scripts intentionally use `--min-creation-time '1601-01-01T00:00:00Z'` so **existing and future blobs** are replicated. If you create policies some other way and keep the default copy-scope, pre-existing data will not backfill.
+- If replication or uploads fail, first check: change feed on the source account, blob versioning on both accounts, data-plane RBAC for the interactive user, and any storage network restrictions that might block your client or operators.
+- If the optional AzDataMaker path fails, check the ACR build, ACI instance state and logs, managed identity assignment, and the `StorageAccountUri`/role assignment on the source account.
+- If you use the AVM companion with CMK or private endpoints, re-validate replication and diagnostics after any key, firewall, DNS, or network change.
+
+### Failover and cutover caveats
+
+Object replication is valuable for regional resilience, but it is **not a full failover product by itself**. It does not automatically switch application endpoints, secrets, identities, DNS, or application permissions for you. Plan and test cutover and failback runbooks separately, and remember that the destination side is read-only while the policy remains active.
+
+## Related docs
+
+- [`Blog.md`](Blog.md) — publishable walkthrough for architects, developers, and DevOps readers
+- [`Blog2.md`](Blog2.md) — AVM companion narrative and design trade-offs
+- [`docs/architecture.md`](docs/architecture.md) — refreshed architecture and data-flow reference
+- [`infra/avm/README.md`](infra/avm/README.md) — AVM deployment instructions and post-deploy activation flow
 
 ## References
 
-- [Object Replication Overview](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-overview)
-- [Configure Object Replication](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-configure)
-- [Priority Replication](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-priority-replication)
-- [AzDataMaker](https://github.com/Azure/azdatamaker)
-- [Azure Storage Pricing](https://azure.microsoft.com/pricing/details/storage/)
+- [Azure Blob Object Replication overview](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-overview)
+- [Configure Azure Blob Object Replication](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-configure)
+- [Priority replication](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-priority-replication)
+- [Optional AzDataMaker source used by this repo](https://github.com/Azure/AzDataMaker.git)
+- [Azure Storage pricing](https://azure.microsoft.com/pricing/details/storage/)
 
 ## License
 

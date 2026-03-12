@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "destinationLocation": {
+      "value": "norwayeast"
+    },
+    "sourceStorageAccountName": {
+      "value": "stobjreplsrcadv"
+    },
+    "destinationStorageAccountName": {
+      "value": "stobjrepldstadv"
+    },
+    "containerCount": {
+      "value": 5
+    },
+    "allowSharedKeyAccess": {
+      "value": false
+    },
+    "enableMonitoring": {
+      "value": true
+    },
+    "logAnalyticsWorkspaceResourceId": {
+      "value": "/subscriptions/<subscription-id>/resourceGroups/<ops-rg>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>"
+    },
+    "enableCmk": {
+      "value": true
+    },
+    "keyVaultResourceId": {
+      "value": "/subscriptions/<subscription-id>/resourceGroups/<platform-rg>/providers/Microsoft.KeyVault/vaults/<key-vault-name>"
+    },
+    "keyName": {
+      "value": "storage-cmk"
+    },
+    "customerManagedKeyIdentityName": {
+      "value": "id-objrepl-storage-cmk"
+    },
+    "enablePrivateEndpoints": {
+      "value": true
+    },
+    "sourcePrivateEndpointSubnetResourceId": {
+      "value": "/subscriptions/<subscription-id>/resourceGroups/<network-rg>/providers/Microsoft.Network/virtualNetworks/<source-vnet>/subnets/<source-pe-subnet>"
+    },
+    "destinationPrivateEndpointSubnetResourceId": {
+      "value": "/subscriptions/<subscription-id>/resourceGroups/<network-rg>/providers/Microsoft.Network/virtualNetworks/<destination-vnet>/subnets/<destination-pe-subnet>"
+    },
+    "blobPrivateDnsZoneResourceId": {
+      "value": "/subscriptions/<subscription-id>/resourceGroups/<network-rg>/providers/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"
+    },
+    "tags": {
+      "value": {
+        "environment": "prod",
+        "deploymentTrack": "avm-companion",
+        "securityZone": "private",
+        "workload": "storage-object-replication"
+      }
+    }
+  }
+}

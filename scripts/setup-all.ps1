@@ -7,6 +7,7 @@
 [CmdletBinding()]
 param(
     [switch]$SkipBenchmark,
+    [switch]$UseAzDataMaker,
     [switch]$DryRun,
     [Parameter(ValueFromRemainingArguments)]
     [string[]]$RemainingArgs
@@ -21,7 +22,8 @@ function usage {
     Write-Host "Run all setup steps in sequence. Supports all config.env overrides."
     Write-Host ""
     Write-Host "Options:"
-    Write-Host "  -SkipBenchmark         Run only core setup (no AzDataMaker/ACI)"
+    Write-Host "  -SkipBenchmark         Run only core setup (no benchmark data generation)"
+    Write-Host "  -UseAzDataMaker        Use optional AzDataMaker benchmarking path"
     Write-Host "  -DryRun                Preview without executing"
     Write-Host "  --subscription <id>    Azure subscription ID"
     Write-Host "  -h, --help             Show this help"
@@ -55,8 +57,19 @@ function Invoke-Step {
 }
 
 # ── Main ──────────────────────────────────────────
+$script:UseAzDataMaker = $UseAzDataMaker.IsPresent
 Import-Config
-Parse-CommonArgs $RemainingArgs
+$unknown = Parse-CommonArgs $RemainingArgs
+foreach ($argument in $unknown) {
+    if ($argument -eq '--use-azdatamaker') {
+        $script:UseAzDataMaker = $true
+        continue
+    }
+
+    Write-Err "Unknown argument: $argument"
+    usage
+    exit 1
+}
 
 if ($SkipBenchmark) { $script:SkipBenchmark = $true }
 if ($DryRun) { $script:DryRun = $true }
@@ -75,6 +88,10 @@ if (-not [string]::IsNullOrWhiteSpace($script:Subscription)) {
 if ($script:DryRun) {
     $fwdArgs += '--dry-run'
 }
+$benchFwdArgs = @($fwdArgs)
+if ($script:UseAzDataMaker) {
+    $benchFwdArgs += '--use-azdatamaker'
+}
 
 # ── Core setup (production-relevant) ────────────
 Write-Log "══════ CORE SETUP ══════"
@@ -85,14 +102,14 @@ if (-not $script:SkipBenchmark) {
     # ── Benchmarking ──────────────────────────────
     Write-Log ""
     Write-Log "══════ BENCHMARKING (data ingestion before replication) ══════"
-    Invoke-Step -Script 'bench-01-ingest-data.ps1' -Description 'Bench 1: Ingest test data' -ForwardArgs $fwdArgs
+    Invoke-Step -Script 'bench-01-ingest-data.ps1' -Description 'Bench 1: Ingest test data' -ForwardArgs $benchFwdArgs
 }
 
 # Replication setup comes after initial data ingestion
 Invoke-Step -Script '03-setup-replication.ps1' -Description 'Step 3: Setup object replication' -ForwardArgs $fwdArgs
 
 if (-not $script:SkipBenchmark) {
-    Invoke-Step -Script 'bench-02-continue-ingestion.ps1' -Description 'Bench 2: Continue ingestion' -ForwardArgs $fwdArgs
+    Invoke-Step -Script 'bench-02-continue-ingestion.ps1' -Description 'Bench 2: Continue ingestion' -ForwardArgs $benchFwdArgs
     Invoke-Step -Script 'bench-03-monitor-replication.ps1' -Description 'Bench 3: Monitor replication' -ForwardArgs $fwdArgs
 }
 

@@ -8,6 +8,9 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
+USE_AZDATAMAKER=false
+DATA_SIZE_GB_EXPLICIT=false
+
 usage() {
   echo "Usage: $0 [OPTIONS]"
   echo ""
@@ -16,26 +19,26 @@ usage() {
   echo ""
   echo "Options:"
   echo "  --data-size-gb <n>     Data to generate in this batch (default: 0.5)"
+  echo "  --aci-count <n>        Number of ACI instances (default: 1, AzDataMaker only)"
   echo "  --subscription <id>    Azure subscription ID"
+  echo "  --use-azdatamaker      Use AzDataMaker via ACR/ACI with managed identity"
   echo "  --dry-run              Preview without executing"
   echo "  -h, --help             Show this help"
 }
 
-main() {
-  load_config
-  parse_common_args "$@"
-  set_subscription
+parse_bench_args() {
+  local remaining=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --use-azdatamaker) USE_AZDATAMAKER=true; shift ;;
+      --data-size-gb) DATA_SIZE_GB_EXPLICIT=true; remaining+=("$1" "$2"); shift 2 ;;
+      *) remaining+=("$1"); shift ;;
+    esac
+  done
+  parse_common_args "${remaining[@]}"
+}
 
-  require_tool az
-
-  # Use a smaller default for continuation
-  : "${DATA_SIZE_GB:=0.5}"
-
-  local start_time
-  start_time=$(date +%s)
-
-  compute_azdatamaker_params
-
+ingest_local() {
   log "Generating additional ~${DATA_SIZE_GB} GB after replication is active..."
 
   local tmpdir
@@ -72,6 +75,56 @@ main() {
     fi
   done
   ok "All ${FILE_COUNT} files uploaded"
+}
+
+ingest_azdatamaker() {
+  initialize_azdatamaker_infra
+
+  local container_names
+  container_names=$(get_container_names "$SOURCE_CONTAINER_PREFIX")
+  local start_index
+  start_index=$(get_max_aci_index)
+
+  log "Deploying ${ACI_COUNT} additional ACI instance(s) for ongoing replication test..."
+  local aci_names=()
+  for x in $(seq 1 "$ACI_COUNT"); do
+    local idx=$((start_index + x))
+    local aci_name
+    aci_name=$(get_aci_name "$idx")
+    deploy_azdatamaker_instance "$aci_name" "$container_names" "50"
+    aci_names+=("$aci_name")
+  done
+
+  wait_for_aci_instances_completion "${aci_names[@]}"
+}
+
+main() {
+  local data_size_gb_from_env=false
+  [[ -n "${DATA_SIZE_GB:-}" ]] && data_size_gb_from_env=true
+
+  load_config
+  parse_bench_args "$@"
+  set_subscription
+
+  require_tool az
+
+  if [[ -n "${CONTINUE_SIZE_GB:-}" ]]; then
+    DATA_SIZE_GB="${CONTINUE_SIZE_GB}"
+  elif ! $DATA_SIZE_GB_EXPLICIT && ! $data_size_gb_from_env; then
+    DATA_SIZE_GB="0.5"
+  fi
+
+  local start_time
+  start_time=$(date +%s)
+  compute_azdatamaker_params
+
+  if $USE_AZDATAMAKER; then
+    log "Using AzDataMaker (managed identity via ACR/ACI) for ongoing data generation..."
+    ingest_azdatamaker
+  else
+    log "Using local file generation + az CLI upload..."
+    ingest_local
+  fi
 
   local end_time elapsed
   end_time=$(date +%s)

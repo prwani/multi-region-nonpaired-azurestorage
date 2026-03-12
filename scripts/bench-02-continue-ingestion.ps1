@@ -5,7 +5,11 @@
 # to measure ongoing replication latency (vs historical catchup).
 # ─────────────────────────────────────────────────────────────────────────────
 [CmdletBinding()]
-param()
+param(
+    [switch]$UseAzDataMaker,
+    [Parameter(ValueFromRemainingArguments)]
+    [string[]]$RemainingArgs
+)
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . "$ScriptDir/common.ps1"
@@ -13,114 +17,108 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 function usage {
     Write-Host "Usage: bench-02-continue-ingestion.ps1 [OPTIONS]"
     Write-Host ""
-    Write-Host "Continue AzDataMaker after replication is active to measure ongoing latency."
+    Write-Host "Continue generating data after replication is active to measure ongoing latency."
     Write-Host "This is for benchmarking only — not part of production setup."
     Write-Host ""
     Write-Host "Options:"
-    Write-Host "  --data-size-gb <n>     Data to generate in this batch (default: 0.5)"
-    Write-Host "  --aci-count <n>        Number of ACI instances (default: 1)"
-    Write-Host "  --subscription <id>    Azure subscription ID"
-    Write-Host "  --dry-run              Preview without executing"
-    Write-Host "  -h, --help             Show this help"
+    Write-Host "  --data-size-gb <n>      Data to generate in this batch (default: 0.5)"
+    Write-Host "  --aci-count <n>         Number of ACI instances (default: 1, AzDataMaker only)"
+    Write-Host "  -UseAzDataMaker         Use AzDataMaker via ACR/ACI with managed identity"
+    Write-Host "  --use-azdatamaker       Same as -UseAzDataMaker"
+    Write-Host "  --subscription <id>     Azure subscription ID"
+    Write-Host "  --dry-run               Preview without executing"
+    Write-Host "  -h, --help              Show this help"
 }
 
+function Parse-BenchArgs {
+    [CmdletBinding()]
+    param([string[]]$Arguments)
+
+    $remaining = @()
+    $index = 0
+    while ($index -lt $Arguments.Count) {
+        switch ($Arguments[$index]) {
+            '--use-azdatamaker' {
+                $script:UseAzDataMaker = $true
+            }
+            '--data-size-gb' {
+                $script:ContinueDataSizeExplicit = $true
+                $remaining += $Arguments[$index]
+                $remaining += $Arguments[$index + 1]
+                $index++
+            }
+            default {
+                $remaining += $Arguments[$index]
+            }
+        }
+        $index++
+    }
+
+    $unknown = Parse-CommonArgs $remaining
+    if ($unknown.Count -gt 0) {
+        Write-Err "Unknown argument: $($unknown -join ', ')"
+        usage
+        exit 1
+    }
+}
+
+function Invoke-AzDataMakerContinuation {
+    [CmdletBinding()]
+    param()
+
+    $infrastructure = Initialize-AzDataMakerInfrastructure
+    $containerNames = Get-ContainerNames -Prefix $script:SourceContainerPrefix
+    $startIndex = Get-MaxAciIndex
+
+    Write-Log "Deploying $($script:AciCount) additional ACI instance(s) for ongoing replication test..."
+    $aciNames = @()
+    for ($x = 1; $x -le $script:AciCount; $x++) {
+        $aciName = Get-AciName -Index ($startIndex + $x)
+        Deploy-AzDataMakerInstance `
+            -AciName $aciName `
+            -Infrastructure $infrastructure `
+            -BlobContainers $containerNames `
+            -ReportStatusIncrement 50
+        $aciNames += $aciName
+    }
+
+    Wait-AciInstancesCompletion -AciNames $aciNames
+}
+
+$script:DataSizeGbFromEnvironment = -not [string]::IsNullOrWhiteSpace([System.Environment]::GetEnvironmentVariable('DATA_SIZE_GB'))
+$script:ContinueDataSizeExplicit = $false
+$script:UseAzDataMaker = $UseAzDataMaker.IsPresent
+
 Import-Config
-Parse-CommonArgs $args
+Parse-BenchArgs $RemainingArgs
 Set-AzSubscription
 
 Test-RequiredTool 'az'
 
-# Use a smaller default for continuation (BENCHMARKING ONLY)
-$continueSizeGb = if ($env:CONTINUE_SIZE_GB) { [double]$env:CONTINUE_SIZE_GB } else { 0.5 }
-$script:DataSizeGb = $continueSizeGb
+if ($env:CONTINUE_SIZE_GB) {
+    $script:DataSizeGb = [double]$env:CONTINUE_SIZE_GB
+}
+elseif (-not $script:ContinueDataSizeExplicit -and -not $script:DataSizeGbFromEnvironment) {
+    $script:DataSizeGb = 0.5
+}
 
 $startTime = Get-Date
+$null = Get-AzDataMakerParams
 
-$params = Get-AzDataMakerParams
-
-# ── Get credentials (BENCHMARKING ONLY) ──────────
-$acrServer  = az acr show --name $script:AcrName --resource-group $script:ResourceGroup --query loginServer -o tsv
-$acrUser    = az acr credential show --name $script:AcrName --resource-group $script:ResourceGroup --query username -o tsv
-$acrPwd     = az acr credential show --name $script:AcrName --resource-group $script:ResourceGroup --query "passwords[0].value" -o tsv
-$storageCs  = az storage account show-connection-string --name $script:SourceStorage --resource-group $script:ResourceGroup -o tsv
-
-$containerNames = Get-ContainerNames -Prefix $script:SourceContainerPrefix
-
-# ── Find next ACI index (BENCHMARKING ONLY) ──────
-try {
-    $maxIdx = [int](az container list `
-        --resource-group $script:ResourceGroup `
-        --query "length([?starts_with(name, '$($script:AciPrefix)-')])" -o tsv 2>$null)
-} catch {
-    $maxIdx = 0
+if ($script:UseAzDataMaker) {
+    Write-Log 'Using AzDataMaker (managed identity via ACR/ACI) for ongoing data generation...'
+    Invoke-AzDataMakerContinuation
+}
+else {
+    Write-Log 'Using local file generation + az CLI upload...'
+    Invoke-LocalBlobUploadBenchmark `
+        -FileNamePrefix 'continue' `
+        -IntroMessage "Generating additional ~$($script:DataSizeGb) GB after replication is active..."
 }
 
-# ── Deploy additional ACI instances (BENCHMARKING ONLY) ──
-Write-Log "Deploying $($script:AciCount) additional ACI instance(s) for ongoing replication test..."
-for ($x = 1; $x -le $script:AciCount; $x++) {
-    $idx = $maxIdx + $x
-    $aciName = '{0}-{1:D2}' -f $script:AciPrefix, $idx
+$elapsed = [int]((Get-Date) - $startTime).TotalSeconds
 
-    Invoke-OrDry -Description "az container create --name '$aciName'" -Command {
-        az container create `
-            --name $aciName `
-            --resource-group $script:ResourceGroup `
-            --location $script:SourceRegion `
-            --cpu 1 `
-            --memory 1 `
-            --registry-login-server $acrServer `
-            --registry-username $acrUser `
-            --registry-password $acrPwd `
-            --image "$acrServer/azdatamaker:latest" `
-            --restart-policy Never `
-            --no-wait `
-            --environment-variables `
-                FileCount="$($script:FilesPerInstance)" `
-                MaxFileSize="$($script:MaxFileSize)" `
-                MinFileSize="$($script:MinFileSize)" `
-                ReportStatusIncrement='50' `
-                BlobContainers="$containerNames" `
-                RandomFileContents='false' `
-            --secure-environment-variables `
-                ConnectionStrings__MyStorageConnection="$storageCs" `
-            --output none
-    }
-    Write-Ok "ACI '$aciName' deployed"
-}
-
-# ── Wait for completion ──────────────────────────
-if (-not $script:DryRun) {
-    Write-Log "Waiting for ACI instances to complete..."
-    $allDone = $false
-    while (-not $allDone) {
-        $allDone = $true
-        for ($x = 1; $x -le $script:AciCount; $x++) {
-            $idx = $maxIdx + $x
-            $aciName = '{0}-{1:D2}' -f $script:AciPrefix, $idx
-            try {
-                $state = az container show `
-                    --name $aciName `
-                    --resource-group $script:ResourceGroup `
-                    --query "instanceView.state" -o tsv 2>$null
-            } catch {
-                $state = 'Unknown'
-            }
-            if ($state -notin 'Succeeded', 'Failed', 'Terminated') {
-                $allDone = $false
-            }
-        }
-        if (-not $allDone) {
-            Write-Host -NoNewline '.'
-            Start-Sleep -Seconds 15
-        }
-    }
-    Write-Host ''
-}
-
-$endTime = Get-Date
-$elapsed = [int]($endTime - $startTime).TotalSeconds
-
-Write-Log "Continued ingestion complete."
+Write-Log 'Continued ingestion complete.'
 Write-Ok  "Elapsed: ${elapsed}s"
 Write-Ok  "Additional data: ~$($script:DataSizeGb) GB"
-Write-Log "Run bench-03-monitor-replication.ps1 to measure replication latency."
+Write-Log 'Run bench-03-monitor-replication.ps1 to measure replication latency.'
