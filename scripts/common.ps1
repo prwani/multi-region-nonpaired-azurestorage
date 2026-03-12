@@ -241,10 +241,6 @@ function Parse-CommonArgs {
     return $remaining
 }
 
-# ── AzDataMaker parameter computation ────────────
-
-function Get-AzDataMakerParams {
-
 function Get-AzDataMakerParams {
     <#
     .SYNOPSIS
@@ -282,6 +278,49 @@ function Get-AzDataMakerParams {
 
 # ── Container name generation ────────────────────
 
+function Get-ContainerNameWidth {
+    [CmdletBinding()]
+    param([int]$Count = $script:ContainerCount)
+
+    return [Math]::Max(2, ([string]$Count).Length)
+}
+
+function Get-FormattedContainerName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Prefix,
+        [Parameter(Mandatory)][int]$Index,
+        [int]$Count = $script:ContainerCount
+    )
+
+    $width = Get-ContainerNameWidth -Count $Count
+    return "$Prefix-$($Index.ToString().PadLeft($width, '0'))"
+}
+
+function Test-ContainerExists {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$AccountName,
+        [Parameter(Mandatory)][string]$ContainerName
+    )
+
+    if ($script:DryRun -or [string]::IsNullOrWhiteSpace($AccountName)) {
+        return $false
+    }
+
+    try {
+        $exists = az storage container exists `
+            --name $ContainerName `
+            --account-name $AccountName `
+            --auth-mode login `
+            --query "exists" -o tsv 2>$null
+        return $exists -eq 'true'
+    }
+    catch {
+        return $false
+    }
+}
+
 function Get-ContainerNames {
     <#
     .SYNOPSIS
@@ -297,10 +336,9 @@ function Get-ContainerNames {
         [int]$Count = $script:ContainerCount
     )
 
-    $width = ([string]$Count).Length
     $names = @()
     for ($i = 1; $i -le $Count; $i++) {
-        $names += "$Prefix-$($i.ToString().PadLeft($width, '0'))"
+        $names += Get-FormattedContainerName -Prefix $Prefix -Index $i -Count $Count
     }
     return ($names -join ',')
 }
@@ -341,6 +379,7 @@ function Invoke-LocalBlobUploadBenchmark {
     param(
         [Parameter(Mandatory)][string]$FileNamePrefix,
         [Parameter(Mandatory)][string]$IntroMessage,
+        [string]$ContainerNames = '',
         [int]$ProgressEvery = 10
     )
 
@@ -349,7 +388,10 @@ function Invoke-LocalBlobUploadBenchmark {
 
     try {
         Write-Log $IntroMessage
-        $containers = (Get-ContainerNames -Prefix $script:SourceContainerPrefix).Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)
+        if ([string]::IsNullOrWhiteSpace($ContainerNames)) {
+            $ContainerNames = Get-ContainerNames -Prefix $script:SourceContainerPrefix -Count $script:ContainerCount
+        }
+        $containers = $ContainerNames.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)
         $containerIndex = 0
 
         for ($i = 1; $i -le $script:FileCount; $i++) {

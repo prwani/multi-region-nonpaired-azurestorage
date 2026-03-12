@@ -29,17 +29,9 @@ Test-RequiredTool az
 
 # ── Create destination containers ───────────────
 Write-Log "Creating $($script:ContainerCount) destination container(s)..."
-$width = ([string]$script:ContainerCount).Length
 for ($i = 1; $i -le $script:ContainerCount; $i++) {
-    $cname = "$($script:DestContainerPrefix)-$($i.ToString().PadLeft($width, '0'))"
-    $exists = az storage container exists `
-        --name $cname `
-        --account-name $script:DestStorage `
-        --auth-mode login `
-        --query "exists" -o tsv 2>$null
-    if (-not $exists) { $exists = "false" }
-
-    if ($exists -eq "true") {
+    $cname = Get-FormattedContainerName -Prefix $script:DestContainerPrefix -Index $i -Count $script:ContainerCount
+    if (Test-ContainerExists -AccountName $script:DestStorage -ContainerName $cname) {
         Write-Ok "Container '$cname' already exists — reusing"
     } else {
         Invoke-OrDry -Description "az storage container create --name '$cname'" -Command {
@@ -78,8 +70,8 @@ if ($script:ContainerCount -gt 10) {
 
     $rules = @()
     for ($i = 1; $i -le $script:ContainerCount; $i++) {
-        $srcContainer = "$($script:SourceContainerPrefix)-$($i.ToString().PadLeft($width, '0'))"
-        $dstContainer = "$($script:DestContainerPrefix)-$($i.ToString().PadLeft($width, '0'))"
+        $srcContainer = Get-FormattedContainerName -Prefix $script:SourceContainerPrefix -Index $i -Count $script:ContainerCount
+        $dstContainer = Get-FormattedContainerName -Prefix $script:DestContainerPrefix -Index $i -Count $script:ContainerCount
         $rules += @{
             sourceContainer      = $srcContainer
             destinationContainer = $dstContainer
@@ -128,8 +120,8 @@ if ($script:ContainerCount -gt 10) {
 
 } else {
     # ── Inline approach (<=10 container pairs) ─────
-    $firstSrcContainer = '{0}-{1}' -f $script:SourceContainerPrefix, (1).ToString().PadLeft($width, '0')
-    $firstDstContainer = '{0}-{1}' -f $script:DestContainerPrefix, (1).ToString().PadLeft($width, '0')
+    $firstSrcContainer = Get-FormattedContainerName -Prefix $script:SourceContainerPrefix -Index 1 -Count $script:ContainerCount
+    $firstDstContainer = Get-FormattedContainerName -Prefix $script:DestContainerPrefix -Index 1 -Count $script:ContainerCount
     $createArgs = @(
         'storage', 'account', 'or-policy', 'create',
         '--account-name', $script:DestStorage,
@@ -165,8 +157,8 @@ if ($script:ContainerCount -gt 10) {
     if ($script:ContainerCount -gt 1) {
         Write-Log "Adding $($script:ContainerCount - 1) remaining replication rule(s)..."
         for ($i = 2; $i -le $script:ContainerCount; $i++) {
-            $srcContainer = "$($script:SourceContainerPrefix)-$($i.ToString().PadLeft($width, '0'))"
-            $dstContainer = "$($script:DestContainerPrefix)-$($i.ToString().PadLeft($width, '0'))"
+            $srcContainer = Get-FormattedContainerName -Prefix $script:SourceContainerPrefix -Index $i -Count $script:ContainerCount
+            $dstContainer = Get-FormattedContainerName -Prefix $script:DestContainerPrefix -Index $i -Count $script:ContainerCount
             Invoke-OrDry -Description "az storage account or-policy rule add: $srcContainer -> $dstContainer" -Command {
                 az storage account or-policy rule add `
                     --account-name $script:DestStorage `

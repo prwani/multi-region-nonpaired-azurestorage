@@ -106,6 +106,7 @@ The optional AzDataMaker path currently:
 - builds from [`https://github.com/Azure/AzDataMaker.git`](https://github.com/Azure/AzDataMaker.git)
 - pushes the image to Azure Container Registry
 - runs Azure Container Instances with a **system-assigned managed identity**
+- currently uses the ACR admin account only as a **benchmark bootstrap convenience** for the ACI image pull; storage access itself still uses managed identity
 - passes `StorageAccountUri` to the container
 - assigns **Storage Blob Data Contributor** on the **source storage account** to that managed identity
 

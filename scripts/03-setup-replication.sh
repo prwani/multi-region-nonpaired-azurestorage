@@ -32,15 +32,11 @@ main() {
   # ── Create destination containers ───────────────
   log "Creating ${CONTAINER_COUNT} destination container(s)..."
 
-  for i in $(seq -w 1 "$CONTAINER_COUNT"); do
-    local cname="${DEST_CONTAINER_PREFIX}-${i}"
-    local exists
-    exists=$(az storage container exists \
-      --name "$cname" \
-      --account-name "$DEST_STORAGE" \
-      --auth-mode login \
-      --query "exists" -o tsv 2>/dev/null || echo "false")
-    if [[ "$exists" == "true" ]]; then
+  for i in $(seq 1 "$CONTAINER_COUNT"); do
+    local cname
+    cname=$(get_default_container_name "$DEST_CONTAINER_PREFIX" "$i" "$CONTAINER_COUNT")
+
+    if container_exists "$DEST_STORAGE" "$cname"; then
       ok "Container '${cname}' already exists — reusing"
     else
       run_or_dry "az storage container create \
@@ -82,8 +78,10 @@ main() {
     # Build the rules array
     local rules="["
     for i in $(seq 1 "$CONTAINER_COUNT"); do
-      local src_container="${SOURCE_CONTAINER_PREFIX}-${i}"
-      local dst_container="${DEST_CONTAINER_PREFIX}-${i}"
+      local src_container
+      local dst_container
+      src_container=$(get_default_container_name "$SOURCE_CONTAINER_PREFIX" "$i" "$CONTAINER_COUNT")
+      dst_container=$(get_default_container_name "$DEST_CONTAINER_PREFIX" "$i" "$CONTAINER_COUNT")
       [[ "$i" -gt 1 ]] && rules="${rules},"
       rules="${rules}{\"sourceContainer\":\"${src_container}\",\"destinationContainer\":\"${dst_container}\",\"filters\":{\"minCreationTime\":\"1601-01-01T00:00:00Z\"}}"
     done
@@ -126,8 +124,10 @@ main() {
 
   else
     # ── Inline approach (<=10 container pairs) ─────
-    local first_src="${SOURCE_CONTAINER_PREFIX}-1"
-    local first_dst="${DEST_CONTAINER_PREFIX}-1"
+    local first_src
+    local first_dst
+    first_src=$(get_default_container_name "$SOURCE_CONTAINER_PREFIX" 1 "$CONTAINER_COUNT")
+    first_dst=$(get_default_container_name "$DEST_CONTAINER_PREFIX" 1 "$CONTAINER_COUNT")
 
     local create_cmd="az storage account or-policy create \
       --account-name '${DEST_STORAGE}' \
@@ -162,8 +162,10 @@ main() {
     if [[ "$CONTAINER_COUNT" -gt 1 ]]; then
       log "Adding remaining $((CONTAINER_COUNT - 1)) rule(s)..."
       for i in $(seq 2 "$CONTAINER_COUNT"); do
-        local src_container="${SOURCE_CONTAINER_PREFIX}-${i}"
-        local dst_container="${DEST_CONTAINER_PREFIX}-${i}"
+        local src_container
+        local dst_container
+        src_container=$(get_default_container_name "$SOURCE_CONTAINER_PREFIX" "$i" "$CONTAINER_COUNT")
+        dst_container=$(get_default_container_name "$DEST_CONTAINER_PREFIX" "$i" "$CONTAINER_COUNT")
         run_or_dry "az storage account or-policy rule add \
           --account-name '${DEST_STORAGE}' \
           --resource-group '${RESOURCE_GROUP}' \

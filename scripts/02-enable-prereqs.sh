@@ -69,15 +69,11 @@ main() {
   # ── Create source containers ────────────────────
   log "Creating ${CONTAINER_COUNT} source container(s)..."
 
-  for i in $(seq -w 1 "$CONTAINER_COUNT"); do
-    local cname="${SOURCE_CONTAINER_PREFIX}-${i}"
-    local exists
-    exists=$(az storage container exists \
-      --name "$cname" \
-      --account-name "$SOURCE_STORAGE" \
-      --auth-mode login \
-      --query "exists" -o tsv 2>/dev/null || echo "false")
-    if [[ "$exists" == "true" ]]; then
+  for i in $(seq 1 "$CONTAINER_COUNT"); do
+    local cname
+    cname=$(get_default_container_name "$SOURCE_CONTAINER_PREFIX" "$i" "$CONTAINER_COUNT")
+
+    if container_exists "$SOURCE_STORAGE" "$cname"; then
       ok "Container '${cname}' already exists — reusing"
     else
       run_or_dry "az storage container create \

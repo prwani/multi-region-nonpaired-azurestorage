@@ -67,7 +67,7 @@ function Invoke-AzDataMakerContinuation {
     param()
 
     $infrastructure = Initialize-AzDataMakerInfrastructure
-    $containerNames = Get-ContainerNames -Prefix $script:SourceContainerPrefix
+    $containerNames = Get-ContainerNames -Prefix $script:SourceContainerPrefix -Count $script:ContainerCount
     $startIndex = Get-MaxAciIndex
 
     Write-Log "Deploying $($script:AciCount) additional ACI instance(s) for ongoing replication test..."
@@ -113,7 +113,8 @@ else {
     Write-Log 'Using local file generation + az CLI upload...'
     Invoke-LocalBlobUploadBenchmark `
         -FileNamePrefix 'continue' `
-        -IntroMessage "Generating additional ~$($script:DataSizeGb) GB after replication is active..."
+        -IntroMessage "Generating additional ~$($script:DataSizeGb) GB after replication is active..." `
+        -ContainerNames (Get-ContainerNames -Prefix $script:SourceContainerPrefix -Count $script:ContainerCount)
 }
 
 $elapsed = [int]((Get-Date) - $startTime).TotalSeconds

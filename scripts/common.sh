@@ -173,13 +173,51 @@ compute_azdatamaker_params() {
 }
 
 # ── Container name generation ────────────────────
+get_container_name_width() {
+  local count="${1:-$CONTAINER_COUNT}"
+  local width="${#count}"
+  (( width < 2 )) && width=2
+  echo "$width"
+}
+
+get_default_container_name() {
+  local prefix="$1"
+  local index="$2"
+  local count="${3:-$CONTAINER_COUNT}"
+  local width
+  width=$(get_container_name_width "$count")
+
+  local suffix
+  printf -v suffix "%0${width}d" "$index"
+  echo "${prefix}-${suffix}"
+}
+
+container_exists() {
+  local account_name="$1"
+  local container_name="$2"
+
+  if $DRY_RUN || [[ -z "$account_name" ]]; then
+    return 1
+  fi
+
+  local exists
+  exists=$(az storage container exists \
+    --name "$container_name" \
+    --account-name "$account_name" \
+    --auth-mode login \
+    --query "exists" -o tsv 2>/dev/null || echo "false")
+
+  [[ "$exists" == "true" ]]
+}
+
 get_container_names() {
   local prefix="$1"
   local count="${2:-$CONTAINER_COUNT}"
   local names=""
-  for i in $(seq -w 1 "$count"); do
+
+  for i in $(seq 1 "$count"); do
     [[ -n "$names" ]] && names="${names},"
-    names="${names}${prefix}-${i}"
+    names="${names}$(get_default_container_name "$prefix" "$i" "$count")"
   done
   echo "$names"
 }

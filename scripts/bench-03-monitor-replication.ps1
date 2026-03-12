@@ -133,9 +133,8 @@ $srcId = az storage account show `
 
 # ── Check blob-level replication status ──────────
 Write-Log "═══ Blob Replication Status (sampled) ═══"
-$width = ([string]$script:ContainerCount).Length
 for ($i = 1; $i -le $script:ContainerCount; $i++) {
-    $cname = "$($script:SourceContainerPrefix)-$($i.ToString().PadLeft($width, '0'))"
+    $cname = Get-FormattedContainerName -Prefix $script:SourceContainerPrefix -Index $i -Count $script:ContainerCount
     Check-BlobReplicationStatus -Account $script:SourceStorage -Container $cname -SampleCount 5
 }
 

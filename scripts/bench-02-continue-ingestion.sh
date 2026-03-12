@@ -46,7 +46,7 @@ ingest_local() {
   trap "rm -rf '$tmpdir'" EXIT
 
   local containers
-  IFS=',' read -ra containers <<< "$(get_container_names "$SOURCE_CONTAINER_PREFIX")"
+  IFS=',' read -ra containers <<< "$(get_container_names "$SOURCE_CONTAINER_PREFIX" "$CONTAINER_COUNT")"
   local container_idx=0
 
   for i in $(seq 1 "$FILE_COUNT"); do
@@ -81,7 +81,7 @@ ingest_azdatamaker() {
   initialize_azdatamaker_infra
 
   local container_names
-  container_names=$(get_container_names "$SOURCE_CONTAINER_PREFIX")
+  container_names=$(get_container_names "$SOURCE_CONTAINER_PREFIX" "$CONTAINER_COUNT")
   local start_index
   start_index=$(get_max_aci_index)
 

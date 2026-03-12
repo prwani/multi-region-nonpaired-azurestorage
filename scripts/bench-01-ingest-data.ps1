@@ -60,7 +60,7 @@ function Invoke-AzDataMakerIngestion {
     param()
 
     $infrastructure = Initialize-AzDataMakerInfrastructure
-    $containerNames = Get-ContainerNames -Prefix $script:SourceContainerPrefix
+    $containerNames = Get-ContainerNames -Prefix $script:SourceContainerPrefix -Count $script:ContainerCount
 
     Write-Log "Deploying $($script:AciCount) ACI instance(s)..."
     $aciNames = @()
@@ -97,7 +97,8 @@ else {
     Write-Log 'Using local file generation + az CLI upload...'
     Invoke-LocalBlobUploadBenchmark `
         -FileNamePrefix 'testfile' `
-        -IntroMessage "Generating $($script:FileCount) test files locally..."
+        -IntroMessage "Generating $($script:FileCount) test files locally..." `
+        -ContainerNames (Get-ContainerNames -Prefix $script:SourceContainerPrefix -Count $script:ContainerCount)
 }
 
 $elapsed = [int]((Get-Date) - $startTime).TotalSeconds

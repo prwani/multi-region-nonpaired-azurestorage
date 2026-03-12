@@ -112,8 +112,9 @@ main() {
 
   # ── Check blob-level replication status ─────────
   log "═══ Blob Replication Status (sampled) ═══"
-  for i in $(seq -w 1 "$CONTAINER_COUNT"); do
-    local cname="${SOURCE_CONTAINER_PREFIX}-${i}"
+  for i in $(seq 1 "$CONTAINER_COUNT"); do
+    local cname
+    cname=$(get_default_container_name "$SOURCE_CONTAINER_PREFIX" "$i" "$CONTAINER_COUNT")
     check_blob_replication_status "$SOURCE_STORAGE" "$cname" 5
   done
 
