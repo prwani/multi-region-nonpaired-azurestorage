@@ -214,6 +214,18 @@ If replication does not behave as expected, check these first:
 - **AzDataMaker issues?** Check the ACR build, ACI lifecycle state, managed identity assignment, `StorageAccountUri`, and the source-account role assignment.
 - **Post-hardening regressions?** After CMK, private endpoint, DNS, or firewall changes, re-test replication and diagnostics explicitly.
 
+### Platform limitations
+
+Before designing around object replication, be aware of its hard constraints:
+
+- Only **block blobs** are replicated. Page blobs and append blobs are not supported.
+- Storage accounts with **hierarchical namespace** enabled (Azure Data Lake Storage Gen2) are **not supported** for object replication.
+- A source account can replicate to at most **two** destination accounts.
+- Priority replication can be enabled on only **one policy per source account**.
+- Cross-tenant replication requires explicit resource IDs and the corresponding cross-tenant settings.
+
+These constraints are documented in detail in the [Azure Blob Object Replication overview](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-overview) and in [`docs/architecture.md`](docs/architecture.md).
+
 ### Failover and cutover caveats
 
 Object replication supports regional resilience, but it does **not** deliver a turnkey application failover workflow on its own.
@@ -277,3 +289,13 @@ Azure Object Replication is the right tool when you need more control than paire
 - an **AVM companion track** that shows how to provision a more production-oriented storage baseline and then activate replication deliberately
 
 For architects, that means better control over region design and security boundaries. For developers, it means a simple path to reproduce and measure behavior. For DevOps teams, it means clearer RBAC, monitoring, and operational boundaries.
+
+## References
+
+- [Azure Blob Object Replication overview](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-overview)
+- [Configure Azure Blob Object Replication](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-configure)
+- [Priority replication](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-priority-replication)
+- [AzDataMaker](https://github.com/Azure/AzDataMaker.git) — optional managed-identity benchmark tool
+- [Azure Storage pricing](https://azure.microsoft.com/pricing/details/storage/)
+- [`docs/architecture.md`](docs/architecture.md) — architecture reference and platform constraints
+- [`Blog2.md`](Blog2.md) — AVM companion narrative and end-to-end walkthrough

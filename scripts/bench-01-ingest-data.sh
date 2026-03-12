@@ -127,6 +127,16 @@ main() {
 
   log "Data ingestion complete."
   ok "Elapsed time: ${elapsed}s"
+
+  # Calculate and report throughput
+  if [[ "$elapsed" -gt 0 ]]; then
+    local avg_file_mb throughput_mbs throughput_fps
+    avg_file_mb=$(echo "scale=2; ($MAX_FILE_SIZE + $MIN_FILE_SIZE) / 2" | bc)
+    throughput_mbs=$(echo "scale=2; $FILE_COUNT * $avg_file_mb / $elapsed" | bc)
+    throughput_fps=$(echo "scale=2; $FILE_COUNT / $elapsed" | bc)
+    ok "Throughput: ~${throughput_mbs} MB/s (~${throughput_fps} files/s)"
+  fi
+
   ok "Target data: ~${DATA_SIZE_GB} GB across ${CONTAINER_COUNT} container(s)"
 }
 

@@ -491,3 +491,16 @@ This companion track says:
 - keep the actual replication activation as an explicit operational step
 
 That makes the repo more useful for architects and DevOps teams without diluting the original demo. One path remains optimized for learning and benchmarking. The new path is optimized for production-oriented implementation.
+
+## References
+
+- [Azure Verified Modules (AVM)](https://azure.github.io/Azure-Verified-Modules/) — Microsoft-maintained Bicep and Terraform modules
+- [AVM Storage Account module](https://github.com/Azure/bicep-registry-modules/tree/main/avm/res/storage/storage-account) — the Bicep module used in this companion track
+- [Bicep language reference](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/overview)
+- [Azure Blob Object Replication overview](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-overview)
+- [Configure Object Replication using a JSON file](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-configure?tabs=azure-cli#configure-object-replication-using-a-json-file)
+- [Customer-managed keys for Azure Storage encryption](https://learn.microsoft.com/en-us/azure/storage/common/customer-managed-keys-overview)
+- [Azure Private Endpoint](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-overview)
+- [Azure Storage pricing](https://azure.microsoft.com/pricing/details/storage/)
+- [`Blog.md`](Blog.md) — CLI-first main track walkthrough
+- [`infra/avm/README.md`](infra/avm/README.md) — AVM deployment instructions

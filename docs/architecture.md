@@ -23,38 +23,36 @@ This repo demonstrates **Azure Blob Storage Object Replication** between non-pai
 
 ## Component diagram
 
-```text
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│ CLI-first main track                                                                   │
-│                                                                                         │
-│  Local workstation / terminal                                                           │
-│  (az login, Bash or PowerShell)                                                         │
-│            │                                                                            │
-│            │ default benchmark path                                                     │
-│            ▼                                                                            │
-│  az storage blob upload --auth-mode login                                               │
-│            │                                                                            │
-│            ▼                                                                            │
-│  Source storage account (change feed + versioning)                                      │
-│            │                                                                            │
-│            │ object replication policy (default or priority)                            │
-│            ▼                                                                            │
-│  Destination storage account (versioning, destination containers become read-only)      │
-│                                                                                         │
-│  Optional benchmark path                                                                │
-│  ACR build from Azure/AzDataMaker -> ACI with system-assigned managed identity         │
-│  -> StorageAccountUri -> writes to source containers                                    │
-└─────────────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph CLI["CLI-first main track"]
+        WS["Local workstation<br/><code>az login</code>, Bash or PowerShell"]
+        UPLOAD["<code>az storage blob upload --auth-mode login</code><br/>(default benchmark path)"]
+        SRC["Source storage account<br/>change feed + versioning"]
+        POLICY["Object replication policy<br/>(default or priority)"]
+        DST["Destination storage account<br/>versioning, containers become read-only"]
 
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│ AVM companion track                                                                     │
-│                                                                                         │
-│  az deployment group create -> infra/avm/main.bicep                                     │
-│        provisions storage accounts, containers, monitoring, optional CMK/private EPs    │
-│                                                                                         │
-│  infra/avm/create-object-replication.sh                                                 │
-│        reads deployment outputs and activates the replication policy                    │
-└─────────────────────────────────────────────────────────────────────────────────────────┘
+        WS --> UPLOAD --> SRC
+        SRC --> POLICY --> DST
+    end
+
+    subgraph OPT["Optional benchmark path"]
+        ACR["ACR build from<br/>Azure/AzDataMaker"]
+        ACI["ACI with system-assigned<br/>managed identity"]
+        ACR --> ACI
+        ACI -->|"StorageAccountUri"| SRC
+    end
+```
+
+```mermaid
+graph TD
+    subgraph AVM["AVM companion track"]
+        DEPLOY["<code>az deployment group create</code><br/><code>infra/avm/main.bicep</code>"]
+        FOUNDATION["Storage accounts, containers,<br/>monitoring, optional CMK / private endpoints"]
+        ACTIVATE["<code>infra/avm/create-object-replication.sh</code><br/>reads deployment outputs,<br/>activates replication policy"]
+
+        DEPLOY --> FOUNDATION --> ACTIVATE
+    end
 ```
 
 ## Data flows

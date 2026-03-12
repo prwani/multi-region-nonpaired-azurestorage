@@ -143,6 +143,46 @@ Shared key authentication is **no longer the main story** in this repo. The defa
 
 Object replication is valuable for regional resilience, but it is **not a full failover product by itself**. It does not automatically switch application endpoints, secrets, identities, DNS, or application permissions for you. Plan and test cutover and failback runbooks separately, and remember that the destination side is read-only while the policy remains active.
 
+## Costs and limits
+
+### Azure Object Replication limits
+
+| Limit | Value |
+|---|---|
+| Maximum destination accounts per source | **2** |
+| Maximum replication policies per storage account | **2** (one as source, one as destination) |
+| Maximum rules per replication policy | **1 000** (use a [JSON policy definition file](https://learn.microsoft.com/en-us/azure/storage/blobs/object-replication-configure?tabs=azure-cli#configure-object-replication-using-a-json-file) for more than 10 rules via CLI) |
+| Priority replication policies per source account | **1** |
+| Supported blob type | **Block blobs only** (page blobs, append blobs, and Data Lake Storage Gen2 with hierarchical namespace are not supported) |
+
+### Cost components
+
+| Component | Applies to |
+|---|---|
+| Change feed | Source account (must be enabled for replication) |
+| Blob versioning storage | Both source and destination accounts |
+| Source reads and destination writes | Replicated blob traffic |
+| Cross-region data transfer | Standard Azure egress between regions |
+| Priority replication surcharge | Per-GB charge; billing continues for **30 days after disabling** |
+| ACR + ACI (optional) | Only when using the AzDataMaker benchmark path |
+
+Use the [Azure Storage pricing calculator](https://azure.microsoft.com/pricing/details/storage/) to estimate costs for your data volume and regions.
+
+## Glossary
+
+| Term | Definition |
+|---|---|
+| **ACI** | Azure Container Instances — serverless container hosting used by the optional AzDataMaker benchmark path |
+| **ACR** | Azure Container Registry — container image registry used to build and store the AzDataMaker image |
+| **AVM** | Azure Verified Modules — Microsoft-maintained Bicep modules for Azure resources |
+| **CMK** | Customer-Managed Key — encryption key stored in Azure Key Vault and managed by the customer |
+| **GRS** | Geo-Redundant Storage — Azure replication to a fixed paired region |
+| **OR** | Object Replication — asynchronous, policy-driven blob replication between storage accounts |
+| **PE** | Private Endpoint — a network interface that connects privately to a service via Azure Private Link |
+| **RA-GRS** | Read-Access Geo-Redundant Storage — GRS with read access to the secondary region |
+| **RBAC** | Role-Based Access Control — Azure identity and access management model |
+| **UAI** | User-Assigned Managed Identity — an Azure identity resource you create and manage explicitly |
+
 ## Related docs
 
 - [`Blog.md`](Blog.md) — publishable walkthrough for architects, developers, and DevOps readers

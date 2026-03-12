@@ -104,4 +104,13 @@ $elapsed = [int]((Get-Date) - $startTime).TotalSeconds
 
 Write-Log 'Data ingestion complete.'
 Write-Ok  "Elapsed time: ${elapsed}s"
+
+# Calculate and report throughput
+if ($elapsed -gt 0) {
+    $avgFileMb = ($script:MaxFileSize + $script:MinFileSize) / 2
+    $throughputMbs = [math]::Round($script:FileCount * $avgFileMb / $elapsed, 2)
+    $throughputFps = [math]::Round($script:FileCount / $elapsed, 2)
+    Write-Ok  "Throughput: ~${throughputMbs} MB/s (~${throughputFps} files/s)"
+}
+
 Write-Ok  "Target data: ~$($script:DataSizeGb) GB across $($script:ContainerCount) container(s)"

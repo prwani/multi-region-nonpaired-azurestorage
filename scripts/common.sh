@@ -32,6 +32,13 @@ AZDATAMAKER_IMAGE="${AZDATAMAKER_IMAGE:-azdatamaker:latest}"
 STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE="${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE:-Storage Blob Data Contributor}"
 
 # ── Helpers ───────────────────────────────────────
+check_az_login() {
+  if ! az account show --query id -o tsv &>/dev/null; then
+    err "Not logged into Azure CLI. Run 'az login' first."
+    exit 1
+  fi
+}
+
 require_tool() {
   local tool="$1"
   if ! command -v "$tool" &>/dev/null; then
@@ -50,6 +57,9 @@ run_or_dry() {
 
 # ── Configuration loading ────────────────────────
 load_config() {
+  # Verify Azure CLI login status before any Azure operations
+  check_az_login
+
   local config_file="${REPO_ROOT}/config.env"
   if [[ -f "$config_file" ]]; then
     # Source config.env but don't override existing env vars

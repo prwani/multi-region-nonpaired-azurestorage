@@ -52,6 +52,23 @@ function Write-Dry {
 
 # ── Helpers ───────────────────────────────────────
 
+function Test-AzLogin {
+    <#
+    .SYNOPSIS
+        Verifies the user is logged into Azure CLI. Exits with an error if not.
+    #>
+    [CmdletBinding()]
+    param()
+    try {
+        $null = az account show --query id -o tsv 2>$null
+        if ($LASTEXITCODE -ne 0) { throw 'not logged in' }
+    }
+    catch {
+        Write-Err "Not logged into Azure CLI. Run 'az login' first."
+        exit 1
+    }
+}
+
 function Invoke-OrDry {
     <#
     .SYNOPSIS
@@ -103,6 +120,9 @@ function Import-Config {
     #>
     [CmdletBinding()]
     param()
+
+    # Verify Azure CLI login status before any Azure operations
+    Test-AzLogin
 
     $configFile = Join-Path $script:RepoRoot 'config.env'
 
@@ -224,6 +244,8 @@ function Parse-CommonArgs {
 # ── AzDataMaker parameter computation ────────────
 
 function Get-AzDataMakerParams {
+
+function Get-AzDataMakerParams {
     <#
     .SYNOPSIS
         Computes FILE_COUNT from DATA_SIZE_GB, MAX/MIN_FILE_SIZE and divides
@@ -289,6 +311,10 @@ function Get-AciName {
 
     return '{0}-{1:D2}' -f $script:AciPrefix, $Index
 }
+
+# ── Local benchmark helpers ──────────────────────
+# These functions generate random test files locally and upload them via
+# az storage blob upload --auth-mode login (the default benchmark path).
 
 function New-RandomBenchmarkFile {
     [CmdletBinding()]
@@ -364,6 +390,10 @@ function Invoke-LocalBlobUploadBenchmark {
         Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+# ── AzDataMaker infrastructure (optional path) ──
+# These functions manage ACR, ACI, and managed-identity role assignments
+# for the optional AzDataMaker benchmark path (--use-azdatamaker).
 
 function Initialize-AzDataMakerInfrastructure {
     [CmdletBinding()]
@@ -459,6 +489,10 @@ function Initialize-AzDataMakerInfrastructure {
         StorageAccountUri = $storageAccountUri
     }
 }
+
+# ── ACI lifecycle and managed-identity helpers ───
+# Wait for ACI principal IDs, handle ACI deletion, check compatibility,
+# and assign the Storage Blob Data Contributor role via managed identity.
 
 function Test-AzDataMakerContainerCompatibility {
     [CmdletBinding()]
@@ -592,6 +626,10 @@ function Ensure-StorageBlobDataContributorRole {
         Start-Sleep -Seconds 10
     }
 }
+
+# ── ACI deployment and completion ────────────────
+# Deploy AzDataMaker ACI instances, wait for them to finish, and manage
+# index tracking for continued-ingestion scenarios.
 
 function Deploy-AzDataMakerInstance {
     [CmdletBinding()]
